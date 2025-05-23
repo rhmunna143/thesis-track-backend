@@ -36,8 +36,26 @@ const getCurrentUser = async (req, res) => {
     res.json(user);
 };
 
+const listUsers = async (req, res) => {
+    try {
+        const users = await prisma.user.findMany({
+            select: {
+                id: true,
+                name: true,
+                email: true,
+                role: true,
+                createdAt: true
+            }
+        });
+        res.json(users);
+    } catch (error) {
+        res.status(500).json({ message: 'Error fetching users', error: error.message });
+    }
+};
+
 module.exports = {
     register,
     login,
-    getCurrentUser
+    getCurrentUser,
+    listUsers
 };
