@@ -119,17 +119,19 @@ const sendEmail = async (to, subject, text, html) => {
 };
 
 // AUTH ROUTES
+// Keep admin registration endpoint with restricted role assignment
 app.post('/auth/register', authenticate, authorize(['ADMIN']), async (req, res) => {
   try {
-    const { name, email, password, role } = req.body;
+    const { name, email, password, role = 'STUDENT' } = req.body;
     
     // Validation
-    if (!name || !email || !password || !role) {
-      return res.status(400).json({ message: 'All fields are required' });
+    if (!name || !email || !password) {
+      return res.status(400).json({ message: 'Name, email and password are required' });
     }
     
-    if (!['STUDENT', 'TEACHER', 'ADMIN'].includes(role)) {
-      return res.status(400).json({ message: 'Invalid role' });
+    // Only allow STUDENT or TEACHER roles to be created by admins
+    if (!['STUDENT', 'TEACHER'].includes(role)) {
+      return res.status(400).json({ message: 'Admins can only create STUDENT or TEACHER accounts' });
     }
     
     // Check if user exists
@@ -210,6 +212,52 @@ app.post('/auth/login', async (req, res) => {
 
 app.get('/me', authenticate, async (req, res) => {
   res.json(req.user);
+});
+
+// Create a public registration endpoint (no authentication required)
+app.post('/auth/signup', async (req, res) => {
+  try {
+    const { name, email, password } = req.body;
+    
+    // Validation
+    if (!name || !email || !password) {
+      return res.status(400).json({ message: 'Name, email and password are required' });
+    }
+    
+    // Check if user exists
+    const existingUser = await prisma.user.findUnique({ where: { email } });
+    if (existingUser) {
+      return res.status(400).json({ message: 'User with this email already exists' });
+    }
+    
+    // Hash password
+    const hashedPassword = await bcrypt.hash(password, 12);
+    
+    // Special case for admin email
+    const role = email === 'rhmunna19@gmail.com' ? 'ADMIN' : 'STUDENT';
+    
+    // Create user
+    const user = await prisma.user.create({
+      data: {
+        name,
+        email,
+        password: hashedPassword,
+        role
+      },
+      select: {
+        id: true,
+        name: true,
+        email: true,
+        role: true,
+        createdAt: true
+      }
+    });
+    
+    res.status(201).json(user);
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ message: 'Server error' });
+  }
 });
 
 // PROPOSAL ROUTES
@@ -611,6 +659,69 @@ app.get('/sessions/active', async (req, res) => {
     }
     
     res.json(activeSession);
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ message: 'Server error' });
+  }
+});
+
+// Change the current register endpoint to be a role management endpoint for admins
+app.patch('/users/:id/role', authenticate, authorize(['ADMIN']), async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { role } = req.body;
+    
+    // Validation
+    if (!role || !['STUDENT', 'TEACHER', 'ADMIN'].includes(role)) {
+      return res.status(400).json({ message: 'Valid role is required' });
+    }
+    
+    // Check if user exists
+    const userToUpdate = await prisma.user.findUnique({ 
+      where: { id: Number(id) } 
+    });
+    
+    if (!userToUpdate) {
+      return res.status(404).json({ message: 'User not found' });
+    }
+    
+    // Update user role
+    const user = await prisma.user.update({
+      where: { id: Number(id) },
+      data: { role },
+      select: {
+        id: true,
+        name: true,
+        email: true,
+        role: true,
+        createdAt: true
+      }
+    });
+    
+    res.status(200).json(user);
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ message: 'Server error' });
+  }
+});
+
+// Add a route for admins to get all users
+app.get('/users', authenticate, authorize(['ADMIN']), async (req, res) => {
+  try {
+    const users = await prisma.user.findMany({
+      select: {
+        id: true,
+        name: true, 
+        email: true,
+        role: true,
+        createdAt: true
+      },
+      orderBy: {
+        createdAt: 'desc'
+      }
+    });
+    
+    res.json(users);
   } catch (error) {
     console.error(error);
     res.status(500).json({ message: 'Server error' });
