@@ -1,0 +1,54 @@
+model User {
+  id        Int      @id @default(autoincrement())
+  name      String
+  email     String   @unique
+  password  String
+  role      UserRole
+  createdAt DateTime @default(now())
+}
+
+model Proposal {
+  id            Int      @id @default(autoincrement())
+  title         String
+  abstract      String
+  status        ProposalStatus
+  studentId     Int
+  supervisorId  Int
+  documentUrl   String
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  student       User     @relation(fields: [studentId], references: [id])
+  supervisor    User     @relation(fields: [supervisorId], references: [id])
+}
+
+model Comment {
+  id          Int      @id @default(autoincrement())
+  content     String
+  proposalId  Int
+  commenterId Int
+  createdAt   DateTime @default(now())
+
+  proposal    Proposal  @relation(fields: [proposalId], references: [id])
+  commenter    User     @relation(fields: [commenterId], references: [id])
+}
+
+model Session {
+  id        Int      @id @default(autoincrement())
+  name      String
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+}
+
+enum UserRole {
+  STUDENT
+  TEACHER
+  ADMIN
+}
+
+enum ProposalStatus {
+  PENDING
+  APPROVED
+  REJECTED
+  REVISION_REQUIRED
+}
