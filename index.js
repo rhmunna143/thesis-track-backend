@@ -1,6 +1,5 @@
 require("dotenv").config();
 const express = require("express");
-const { PrismaClient } = require("@prisma/client");
 const jwt = require("jsonwebtoken");
 const bcrypt = require("bcrypt");
 const multer = require("multer");
@@ -8,45 +7,122 @@ const path = require("path");
 const fs = require("fs");
 const nodemailer = require("nodemailer");
 const cors = require("cors");
+const { Pool } = require('pg');
 
 // Initialize Express app
 const app = express();
-const prisma = new PrismaClient();
 const PORT = process.env.PORT || 5000;
 
 // Configure middleware
 app.use(cors());
 app.use(express.json());
-app.use("/uploads", express.static("uploads"));
 
-// Create uploads directory if it doesn't exist
-if (!fs.existsSync("./uploads")) {
-  fs.mkdirSync("./uploads");
-}
-
-// Configure multer for file uploads
-const storage = multer.diskStorage({
-  destination: (req, file, cb) => {
-    cb(null, "uploads/");
-  },
-  filename: (req, file, cb) => {
-    cb(null, `${Date.now()}-${file.originalname}`);
-  },
+// Initialize PostgreSQL connection pool
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false
 });
 
-const fileFilter = (req, file, cb) => {
-  if (file.mimetype === "application/pdf") {
-    cb(null, true);
-  } else {
-    cb(new Error("Only PDF files are allowed"), false);
+// Create a simple query method
+const query = (text, params) => pool.query(text, params);
+
+// Database initialization function
+async function initializeDatabase() {
+  try {
+    // Create types - REMOVE "IF NOT EXISTS" from CREATE TYPE statements
+    await query(`
+      DO $$ BEGIN
+        CREATE TYPE user_role AS ENUM ('STUDENT', 'TEACHER', 'ADMIN');
+        CREATE TYPE proposal_status AS ENUM ('PENDING', 'APPROVED', 'REJECTED', 'REVISION_REQUIRED');
+      EXCEPTION
+        WHEN duplicate_object THEN null;
+      END $$;
+    `);
+
+    // Create users table
+    await query(`
+      CREATE TABLE IF NOT EXISTS users (
+        id SERIAL PRIMARY KEY,
+        name VARCHAR(255) NOT NULL,
+        email VARCHAR(255) UNIQUE NOT NULL,
+        password VARCHAR(255) NOT NULL,
+        role user_role NOT NULL,
+        created_at TIMESTAMP NOT NULL DEFAULT NOW()
+      )
+    `);
+
+    // Create sessions table
+    await query(`
+      CREATE TABLE IF NOT EXISTS sessions (
+        id SERIAL PRIMARY KEY,
+        name VARCHAR(255) NOT NULL,
+        is_active BOOLEAN DEFAULT FALSE,
+        created_at TIMESTAMP NOT NULL DEFAULT NOW()
+      )
+    `);
+
+    // Create proposals table
+    await query(`
+      CREATE TABLE IF NOT EXISTS proposals (
+        id SERIAL PRIMARY KEY,
+        title VARCHAR(255) NOT NULL,
+        abstract TEXT NOT NULL,
+        status proposal_status NOT NULL DEFAULT 'PENDING',
+        document_url VARCHAR(255) NOT NULL,
+        student_id INTEGER NOT NULL REFERENCES users(id),
+        supervisor_id INTEGER NOT NULL REFERENCES users(id),
+        created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+        updated_at TIMESTAMP NOT NULL DEFAULT NOW()
+      )
+    `);
+
+    // Create comments table
+    await query(`
+      CREATE TABLE IF NOT EXISTS comments (
+        id SERIAL PRIMARY KEY,
+        content TEXT NOT NULL,
+        proposal_id INTEGER NOT NULL REFERENCES proposals(id),
+        commenter_id INTEGER NOT NULL REFERENCES users(id),
+        created_at TIMESTAMP NOT NULL DEFAULT NOW()
+      )
+    `);
+
+    // Create indexes
+    await query(`CREATE INDEX IF NOT EXISTS idx_proposals_student_id ON proposals(student_id)`);
+    await query(`CREATE INDEX IF NOT EXISTS idx_proposals_supervisor_id ON proposals(supervisor_id)`);
+    await query(`CREATE INDEX IF NOT EXISTS idx_comments_proposal_id ON comments(proposal_id)`);
+    
+    console.log('Database initialized successfully');
+    
+    // Create default admin if it doesn't exist
+    const adminEmail = 'rhmunna19@gmail.com';
+    const adminExists = await query('SELECT * FROM users WHERE email = $1', [adminEmail]);
+    
+    if (adminExists.rows.length === 0) {
+      const hashedPassword = await bcrypt.hash('admin123', 12);
+      await query(
+        'INSERT INTO users (name, email, password, role) VALUES ($1, $2, $3, $4)',
+        ['Admin User', adminEmail, hashedPassword, 'ADMIN']
+      );
+      console.log('Default admin created');
+    }
+    
+    // Create a default session if none exists
+    const sessionExists = await query('SELECT * FROM sessions WHERE is_active = TRUE');
+    
+    if (sessionExists.rows.length === 0) {
+      await query(
+        'INSERT INTO sessions (name, is_active) VALUES ($1, $2)',
+        ['Default Session', true]
+      );
+      console.log('Default active session created');
+    }
+    
+  } catch (error) {
+    console.error('Database initialization error:', error);
+    process.exit(1);
   }
-};
-
-const upload = multer({
-  storage,
-  fileFilter,
-  limits: { fileSize: 5 * 1024 * 1024 }, // 5MB max
-});
+}
 
 // Configure nodemailer
 const transporter = nodemailer.createTransport({
@@ -70,22 +146,17 @@ const authenticate = async (req, res, next) => {
     const token = authHeader.split(" ")[1];
     const decoded = jwt.verify(token, process.env.JWT_SECRET);
 
-    const user = await prisma.user.findUnique({
-      where: { id: decoded.userId },
-      select: {
-        id: true,
-        name: true,
-        email: true,
-        role: true,
-        createdAt: true,
-      },
-    });
+    // Get user from database
+    const { rows } = await query(
+      'SELECT id, name, email, role, created_at FROM users WHERE id = $1',
+      [decoded.userId]
+    );
 
-    if (!user) {
+    if (rows.length === 0) {
       return res.status(401).json({ message: "User not found" });
     }
 
-    req.user = user;
+    req.user = rows[0];
     next();
   } catch (error) {
     return res.status(401).json({ message: "Invalid or expired token" });
@@ -152,8 +223,12 @@ app.post(
       }
 
       // Check if user exists
-      const existingUser = await prisma.user.findUnique({ where: { email } });
-      if (existingUser) {
+      const existingUser = await query(
+        'SELECT * FROM users WHERE email = $1',
+        [email]
+      );
+      
+      if (existingUser.rows.length > 0) {
         return res
           .status(400)
           .json({ message: "User with this email already exists" });
@@ -163,23 +238,12 @@ app.post(
       const hashedPassword = await bcrypt.hash(password, 12);
 
       // Create user
-      const user = await prisma.user.create({
-        data: {
-          name,
-          email,
-          password: hashedPassword,
-          role,
-        },
-        select: {
-          id: true,
-          name: true,
-          email: true,
-          role: true,
-          createdAt: true,
-        },
-      });
+      const result = await query(
+        'INSERT INTO users (name, email, password, role) VALUES ($1, $2, $3, $4) RETURNING id, name, email, role, created_at',
+        [name, email, hashedPassword, role]
+      );
 
-      res.status(201).json(user);
+      res.status(201).json(result.rows[0]);
     } catch (error) {
       console.error(error);
       res.status(500).json({ message: "Server error" });
@@ -199,7 +263,13 @@ app.post("/auth/login", async (req, res) => {
     }
 
     // Find user
-    const user = await prisma.user.findUnique({ where: { email } });
+    const result = await query(
+      'SELECT * FROM users WHERE email = $1',
+      [email]
+    );
+    
+    const user = result.rows[0];
+    
     if (!user) {
       return res.status(400).json({ message: "Invalid credentials" });
     }
@@ -249,8 +319,12 @@ app.post("/auth/signup", async (req, res) => {
     }
 
     // Check if user exists
-    const existingUser = await prisma.user.findUnique({ where: { email } });
-    if (existingUser) {
+    const existingUser = await query(
+      'SELECT * FROM users WHERE email = $1',
+      [email]
+    );
+    
+    if (existingUser.rows.length > 0) {
       return res
         .status(400)
         .json({ message: "User with this email already exists" });
@@ -263,23 +337,12 @@ app.post("/auth/signup", async (req, res) => {
     const role = email === "rhmunna19@gmail.com" ? "ADMIN" : "STUDENT";
 
     // Create user
-    const user = await prisma.user.create({
-      data: {
-        name,
-        email,
-        password: hashedPassword,
-        role,
-      },
-      select: {
-        id: true,
-        name: true,
-        email: true,
-        role: true,
-        createdAt: true,
-      },
-    });
+    const result = await query(
+      'INSERT INTO users (name, email, password, role) VALUES ($1, $2, $3, $4) RETURNING id, name, email, role, created_at',
+      [name, email, hashedPassword, role]
+    );
 
-    res.status(201).json(user);
+    res.status(201).json(result.rows[0]);
   } catch (error) {
     console.error(error);
     res.status(500).json({ message: "Server error" });
@@ -294,11 +357,11 @@ app.post(
   async (req, res) => {
     try {
       // Check if there is an active session
-      const activeSession = await prisma.session.findFirst({
-        where: { isActive: true },
-      });
+      const activeSessionResult = await query(
+        'SELECT * FROM sessions WHERE is_active = TRUE LIMIT 1'
+      );
 
-      if (!activeSession) {
+      if (activeSessionResult.rows.length === 0) {
         return res
           .status(400)
           .json({ message: "No active submission session" });
@@ -312,45 +375,58 @@ app.post(
       }
 
       // Check if supervisor exists and is a TEACHER
-      const supervisor = await prisma.user.findFirst({
-        where: { id: Number(supervisorId), role: "TEACHER" },
-      });
+      const supervisorResult = await query(
+        'SELECT * FROM users WHERE id = $1 AND role = $2',
+        [supervisorId, 'TEACHER']
+      );
 
-      if (!supervisor) {
+      if (supervisorResult.rows.length === 0) {
         return res.status(400).json({ message: "Invalid supervisor" });
       }
 
       // Create proposal
-      const proposal = await prisma.proposal.create({
-        data: {
-          title,
-          abstract,
-          status: "PENDING",
-          documentUrl, // Use the provided documentUrl directly
-          student: { connect: { id: req.user.id } },
-          supervisor: { connect: { id: Number(supervisorId) } },
-        },
-        include: {
-          student: {
-            select: { name: true, email: true },
-          },
-          supervisor: {
-            select: { name: true, email: true },
-          },
-        },
-      });
+      const proposalResult = await query(
+        `INSERT INTO proposals 
+        (title, abstract, status, document_url, student_id, supervisor_id) 
+        VALUES ($1, $2, $3, $4, $5, $6) 
+        RETURNING id, title, abstract, status, document_url, student_id, supervisor_id, created_at, updated_at`,
+        [title, abstract, 'PENDING', documentUrl, req.user.id, supervisorId]
+      );
+      
+      const proposal = proposalResult.rows[0];
+      
+      // Get student and supervisor details
+      const studentResult = await query(
+        'SELECT name, email FROM users WHERE id = $1',
+        [req.user.id]
+      );
+      
+      const supervisorDetailsResult = await query(
+        'SELECT name, email FROM users WHERE id = $1',
+        [supervisorId]
+      );
+      
+      const student = studentResult.rows[0];
+      const supervisor = supervisorDetailsResult.rows[0];
 
       // Send notification email to supervisor
       await sendEmail(
-        proposal.supervisor.email,
+        supervisor.email,
         "New Thesis Proposal Submitted",
-        `Dear ${proposal.supervisor.name},\n\nA new thesis proposal "${title}" has been submitted by ${proposal.student.name} and requires your review.`,
-        `<p>Dear ${proposal.supervisor.name},</p>
-       <p>A new thesis proposal <strong>"${title}"</strong> has been submitted by ${proposal.student.name} and requires your review.</p>
+        `Dear ${supervisor.name},\n\nA new thesis proposal "${title}" has been submitted by ${student.name} and requires your review.`,
+        `<p>Dear ${supervisor.name},</p>
+       <p>A new thesis proposal <strong>"${title}"</strong> has been submitted by ${student.name} and requires your review.</p>
        <p>Please log in to the ThesisTrack system to review this proposal.</p>`
       );
 
-      res.status(201).json(proposal);
+      // Format response to match the format expected by frontend
+      const result = {
+        ...proposal,
+        student: { name: student.name, email: student.email },
+        supervisor: { name: supervisor.name, email: supervisor.email }
+      };
+
+      res.status(201).json(result);
     } catch (error) {
       console.error(error);
       res.status(500).json({ message: "Server error" });
@@ -361,87 +437,100 @@ app.post(
 app.get("/proposals", authenticate, async (req, res) => {
   try {
     let proposals = [];
+    let query = '';
+    let params = [];
 
     if (req.user.role === "ADMIN") {
       // Admin sees all proposals
-      proposals = await prisma.proposal.findMany({
-        include: {
-          student: {
-            select: { id: true, name: true, email: true },
-          },
-          supervisor: {
-            select: { id: true, name: true, email: true },
-          },
-          comments: {
-            include: {
-              commenter: {
-                select: { id: true, name: true, role: true },
-              },
-            },
-            orderBy: {
-              createdAt: "desc",
-            },
-          },
-        },
-        orderBy: {
-          createdAt: "desc",
-        },
-      });
+      query = `
+        SELECT 
+          p.id, p.title, p.abstract, p.status, p.document_url, 
+          p.student_id, p.supervisor_id, p.created_at, p.updated_at,
+          s.id as student_id, s.name as student_name, s.email as student_email,
+          t.id as supervisor_id, t.name as supervisor_name, t.email as supervisor_email
+        FROM proposals p
+        JOIN users s ON p.student_id = s.id
+        JOIN users t ON p.supervisor_id = t.id
+        ORDER BY p.created_at DESC
+      `;
     } else if (req.user.role === "TEACHER") {
       // Teachers see proposals where they're the supervisor
-      proposals = await prisma.proposal.findMany({
-        where: {
-          supervisorId: req.user.id,
-        },
-        include: {
-          student: {
-            select: { id: true, name: true, email: true },
-          },
-          supervisor: {
-            select: { id: true, name: true, email: true },
-          },
-          comments: {
-            include: {
-              commenter: {
-                select: { id: true, name: true, role: true },
-              },
-            },
-            orderBy: {
-              createdAt: "desc",
-            },
-          },
-        },
-        orderBy: {
-          createdAt: "desc",
-        },
-      });
+      query = `
+        SELECT 
+          p.id, p.title, p.abstract, p.status, p.document_url, 
+          p.student_id, p.supervisor_id, p.created_at, p.updated_at,
+          s.id as student_id, s.name as student_name, s.email as student_email,
+          t.id as supervisor_id, t.name as supervisor_name, t.email as supervisor_email
+        FROM proposals p
+        JOIN users s ON p.student_id = s.id
+        JOIN users t ON p.supervisor_id = t.id
+        WHERE p.supervisor_id = $1
+        ORDER BY p.created_at DESC
+      `;
+      params = [req.user.id];
     } else if (req.user.role === "STUDENT") {
       // Students see their own proposals
-      proposals = await prisma.proposal.findMany({
-        where: {
-          studentId: req.user.id,
+      query = `
+        SELECT 
+          p.id, p.title, p.abstract, p.status, p.document_url, 
+          p.student_id, p.supervisor_id, p.created_at, p.updated_at,
+          s.id as student_id, s.name as student_name, s.email as student_email,
+          t.id as supervisor_id, t.name as supervisor_name, t.email as supervisor_email
+        FROM proposals p
+        JOIN users s ON p.student_id = s.id
+        JOIN users t ON p.supervisor_id = t.id
+        WHERE p.student_id = $1
+        ORDER BY p.created_at DESC
+      `;
+      params = [req.user.id];
+    }
+
+    const result = await query(query, params);
+    
+    // Get comments for each proposal
+    for (const row of result.rows) {
+      const commentsResult = await query(
+        `SELECT c.id, c.content, c.commenter_id, c.created_at, 
+         u.name as commenter_name, u.role as commenter_role
+         FROM comments c
+         JOIN users u ON c.commenter_id = u.id
+         WHERE c.proposal_id = $1
+         ORDER BY c.created_at DESC`,
+        [row.id]
+      );
+      
+      // Format the data to match expected structure
+      proposals.push({
+        id: row.id,
+        title: row.title,
+        abstract: row.abstract,
+        status: row.status,
+        documentUrl: row.document_url,
+        studentId: row.student_id,
+        supervisorId: row.supervisor_id,
+        createdAt: row.created_at,
+        updatedAt: row.updated_at,
+        student: {
+          id: row.student_id,
+          name: row.student_name,
+          email: row.student_email
         },
-        include: {
-          student: {
-            select: { id: true, name: true, email: true },
-          },
-          supervisor: {
-            select: { id: true, name: true, email: true },
-          },
-          comments: {
-            include: {
-              commenter: {
-                select: { id: true, name: true, role: true },
-              },
-            },
-            orderBy: {
-              createdAt: "desc",
-            },
-          },
+        supervisor: {
+          id: row.supervisor_id,
+          name: row.supervisor_name,
+          email: row.supervisor_email
         },
-        orderBy: {
-          createdAt: "desc",
-        },
+        comments: commentsResult.rows.map(c => ({
+          id: c.id,
+          content: c.content,
+          commenterId: c.commenter_id,
+          createdAt: c.created_at,
+          commenter: {
+            id: c.commenter_id,
+            name: c.commenter_name,
+            role: c.commenter_role
+          }
+        }))
       });
     }
 
@@ -473,49 +562,65 @@ app.patch(
       }
 
       // Check if proposal exists and belongs to this supervisor
-      const proposal = await prisma.proposal.findFirst({
-        where: {
-          id: Number(id),
-          supervisorId: req.user.id,
-        },
-        include: {
-          student: {
-            select: { name: true, email: true },
-          },
-        },
-      });
+      const proposalResult = await query(
+        `SELECT p.*, s.name as student_name, s.email as student_email
+         FROM proposals p
+         JOIN users s ON p.student_id = s.id
+         WHERE p.id = $1 AND p.supervisor_id = $2`,
+        [id, req.user.id]
+      );
 
-      if (!proposal) {
+      if (proposalResult.rows.length === 0) {
         return res
           .status(404)
           .json({ message: "Proposal not found or access denied" });
       }
 
+      const proposal = proposalResult.rows[0];
+
       // Update proposal status
-      const updatedProposal = await prisma.proposal.update({
-        where: { id: Number(id) },
-        data: { status },
-        include: {
-          student: {
-            select: { name: true, email: true },
-          },
-          supervisor: {
-            select: { name: true, email: true },
-          },
-        },
-      });
+      const updateResult = await query(
+        `UPDATE proposals 
+         SET status = $1, updated_at = NOW() 
+         WHERE id = $2 
+         RETURNING id, title, abstract, status, document_url, student_id, supervisor_id, created_at, updated_at`,
+        [status, id]
+      );
+      
+      const updatedProposal = updateResult.rows[0];
+      
+      // Get supervisor details
+      const supervisorResult = await query(
+        'SELECT name, email FROM users WHERE id = $1',
+        [req.user.id]
+      );
+      
+      const supervisor = supervisorResult.rows[0];
 
       // Send notification email to student
       await sendEmail(
-        proposal.student.email,
+        proposal.student_email,
         `Thesis Proposal Status Updated: ${status}`,
-        `Dear ${proposal.student.name},\n\nThe status of your thesis proposal has been updated to ${status} by ${req.user.name}.`,
-        `<p>Dear ${proposal.student.name},</p>
+        `Dear ${proposal.student_name},\n\nThe status of your thesis proposal has been updated to ${status} by ${req.user.name}.`,
+        `<p>Dear ${proposal.student_name},</p>
        <p>The status of your thesis proposal has been updated to <strong>${status}</strong> by ${req.user.name}.</p>
        <p>Please log in to the ThesisTrack system for more details.</p>`
       );
 
-      res.json(updatedProposal);
+      // Format response
+      const result = {
+        ...updatedProposal,
+        student: {
+          name: proposal.student_name,
+          email: proposal.student_email
+        },
+        supervisor: {
+          name: supervisor.name,
+          email: supervisor.email
+        }
+      };
+
+      res.json(result);
     } catch (error) {
       console.error(error);
       res.status(500).json({ message: "Server error" });
@@ -538,62 +643,82 @@ app.patch(
       }
 
       // Check if supervisor exists and is a TEACHER
-      const supervisor = await prisma.user.findFirst({
-        where: { id: Number(supervisorId), role: "TEACHER" },
-      });
+      const supervisor = await query(
+        'SELECT * FROM users WHERE id = $1 AND role = $2',
+        [supervisorId, 'TEACHER']
+      );
 
-      if (!supervisor) {
+      if (supervisor.rows.length === 0) {
         return res.status(400).json({ message: "Invalid supervisor" });
       }
 
       // Check if proposal exists
-      const proposalExists = await prisma.proposal.findUnique({
-        where: { id: Number(id) },
-        include: {
-          student: {
-            select: { name: true, email: true },
-          },
-        },
-      });
+      const proposalExists = await query(
+        'SELECT * FROM proposals WHERE id = $1',
+        [id]
+      );
 
-      if (!proposalExists) {
+      if (proposalExists.rows.length === 0) {
         return res.status(404).json({ message: "Proposal not found" });
       }
 
       // Update proposal supervisor
-      const updatedProposal = await prisma.proposal.update({
-        where: { id: Number(id) },
-        data: { supervisorId: Number(supervisorId) },
-        include: {
-          student: {
-            select: { name: true, email: true },
-          },
-          supervisor: {
-            select: { name: true, email: true },
-          },
-        },
-      });
+      const updatedProposal = await query(
+        `UPDATE proposals 
+         SET supervisor_id = $1, updated_at = NOW() 
+         WHERE id = $2 
+         RETURNING id, title, abstract, status, document_url, student_id, supervisor_id, created_at, updated_at`,
+        [supervisorId, id]
+      );
+
+      const proposal = updatedProposal.rows[0];
+
+      // Get supervisor and student details
+      const supervisorDetails = await query(
+        'SELECT name, email FROM users WHERE id = $1',
+        [supervisorId]
+      );
+
+      const studentDetails = await query(
+        'SELECT name, email FROM users WHERE id = $1',
+        [proposal.student_id]
+      );
 
       // Send notification emails
       await sendEmail(
-        updatedProposal.supervisor.email,
+        supervisorDetails.rows[0].email,
         "Thesis Proposal Assigned to You",
-        `Dear ${updatedProposal.supervisor.name},\n\nYou have been assigned as the supervisor for the thesis proposal "${updatedProposal.title}" by ${updatedProposal.student.name}.`,
-        `<p>Dear ${updatedProposal.supervisor.name},</p>
-       <p>You have been assigned as the supervisor for the thesis proposal <strong>"${updatedProposal.title}"</strong> by ${updatedProposal.student.name}.</p>
+        `Dear ${supervisorDetails.rows[0].name},\n\nYou have been assigned as the supervisor for the thesis proposal "${proposal.title}" by ${studentDetails.rows[0].name}.`,
+        `<p>Dear ${supervisorDetails.rows[0].name},</p>
+       <p>You have been assigned as the supervisor for the thesis proposal <strong>"${proposal.title}"</strong> by ${studentDetails.rows[0].name}.</p>
        <p>Please log in to the ThesisTrack system to review this proposal.</p>`
       );
 
       await sendEmail(
-        updatedProposal.student.email,
+        studentDetails.rows[0].email,
         "New Supervisor Assigned",
-        `Dear ${updatedProposal.student.name},\n\n${updatedProposal.supervisor.name} has been assigned as the supervisor for your thesis proposal.`,
-        `<p>Dear ${updatedProposal.student.name},</p>
-       <p>${updatedProposal.supervisor.name} has been assigned as the supervisor for your thesis proposal.</p>
+        `Dear ${studentDetails.rows[0].name},\n\n${supervisorDetails.rows[0].name} has been assigned as the supervisor for your thesis proposal.`,
+        `<p>Dear ${studentDetails.rows[0].name},</p>
+       <p>${supervisorDetails.rows[0].name} has been assigned as the supervisor for your thesis proposal.</p>
        <p>Please log in to the ThesisTrack system for more details.</p>`
       );
 
-      res.json(updatedProposal);
+      // Format response
+      const result = {
+        ...proposal,
+        supervisor: {
+          id: supervisorId,
+          name: supervisorDetails.rows[0].name,
+          email: supervisorDetails.rows[0].email
+        },
+        student: {
+          id: proposal.student_id,
+          name: studentDetails.rows[0].name,
+          email: studentDetails.rows[0].email
+        }
+      };
+
+      res.json(result);
     } catch (error) {
       console.error(error);
       res.status(500).json({ message: "Server error" });
@@ -618,26 +743,26 @@ app.post(
       }
 
       // Check if proposal exists
-      const proposal = await prisma.proposal.findUnique({
-        where: { id: Number(proposalId) },
-        include: {
-          student: {
-            select: { id: true, name: true, email: true },
-          },
-          supervisor: {
-            select: { id: true, name: true, email: true },
-          },
-        },
-      });
+      const proposalResult = await query(
+        `SELECT p.*, s.name as student_name, s.email as student_email,
+         t.name as supervisor_name, t.email as supervisor_email
+         FROM proposals p
+         JOIN users s ON p.student_id = s.id
+         JOIN users t ON p.supervisor_id = t.id
+         WHERE p.id = $1`,
+        [proposalId]
+      );
 
-      if (!proposal) {
+      if (proposalResult.rows.length === 0) {
         return res.status(404).json({ message: "Proposal not found" });
       }
+
+      const proposal = proposalResult.rows[0];
 
       // Check if the commenter is the supervisor or an admin
       if (
         req.user.role === "TEACHER" &&
-        proposal.supervisorId !== req.user.id
+        proposal.supervisor_id !== req.user.id
       ) {
         return res
           .status(403)
@@ -645,31 +770,45 @@ app.post(
       }
 
       // Create comment
-      const comment = await prisma.comment.create({
-        data: {
-          content,
-          proposal: { connect: { id: Number(proposalId) } },
-          commenter: { connect: { id: req.user.id } },
-        },
-        include: {
-          commenter: {
-            select: { id: true, name: true, role: true },
-          },
-        },
-      });
+      const commentResult = await query(
+        `INSERT INTO comments (content, proposal_id, commenter_id)
+         VALUES ($1, $2, $3)
+         RETURNING id, content, proposal_id, commenter_id, created_at`,
+        [content, proposalId, req.user.id]
+      );
+      
+      const comment = commentResult.rows[0];
+      
+      // Get commenter details
+      const commenterResult = await query(
+        'SELECT name, role FROM users WHERE id = $1',
+        [req.user.id]
+      );
+      
+      const commenter = commenterResult.rows[0];
 
       // Send notification email to student
       await sendEmail(
-        proposal.student.email,
+        proposal.student_email,
         "New Comment on Your Thesis Proposal",
-        `Dear ${proposal.student.name},\n\n${req.user.name} has commented on your thesis proposal "${proposal.title}".`,
-        `<p>Dear ${proposal.student.name},</p>
+        `Dear ${proposal.student_name},\n\n${req.user.name} has commented on your thesis proposal "${proposal.title}".`,
+        `<p>Dear ${proposal.student_name},</p>
        <p>${req.user.name} has commented on your thesis proposal <strong>"${proposal.title}"</strong>.</p>
        <p>Comment: "${content}"</p>
        <p>Please log in to the ThesisTrack system to view the comment and respond if necessary.</p>`
       );
 
-      res.status(201).json(comment);
+      // Format response
+      const result = {
+        ...comment,
+        commenter: {
+          id: req.user.id,
+          name: commenter.name,
+          role: commenter.role
+        }
+      };
+
+      res.status(201).json(result);
     } catch (error) {
       console.error(error);
       res.status(500).json({ message: "Server error" });
@@ -689,21 +828,18 @@ app.post("/sessions", authenticate, authorize(["ADMIN"]), async (req, res) => {
 
     // If new session is active, deactivate all other sessions
     if (isActive) {
-      await prisma.session.updateMany({
-        where: { isActive: true },
-        data: { isActive: false },
-      });
+      await query(
+        'UPDATE sessions SET is_active = FALSE WHERE is_active = TRUE'
+      );
     }
 
     // Create session
-    const session = await prisma.session.create({
-      data: {
-        name,
-        isActive: isActive || false,
-      },
-    });
+    const sessionResult = await query(
+      'INSERT INTO sessions (name, is_active) VALUES ($1, $2) RETURNING *',
+      [name, isActive || false]
+    );
 
-    res.status(201).json(session);
+    res.status(201).json(sessionResult.rows[0]);
   } catch (error) {
     console.error(error);
     res.status(500).json({ message: "Server error" });
@@ -712,15 +848,15 @@ app.post("/sessions", authenticate, authorize(["ADMIN"]), async (req, res) => {
 
 app.get("/sessions/active", async (req, res) => {
   try {
-    const activeSession = await prisma.session.findFirst({
-      where: { isActive: true },
-    });
+    const activeSession = await query(
+      'SELECT * FROM sessions WHERE is_active = TRUE LIMIT 1'
+    );
 
-    if (!activeSession) {
+    if (activeSession.rows.length === 0) {
       return res.status(404).json({ message: "No active session found" });
     }
 
-    res.json(activeSession);
+    res.json(activeSession.rows[0]);
   } catch (error) {
     console.error(error);
     res.status(500).json({ message: "Server error" });
@@ -743,28 +879,22 @@ app.patch(
       }
 
       // Check if user exists
-      const userToUpdate = await prisma.user.findUnique({
-        where: { id: Number(id) },
-      });
+      const userToUpdate = await query(
+        'SELECT * FROM users WHERE id = $1',
+        [id]
+      );
 
-      if (!userToUpdate) {
+      if (userToUpdate.rows.length === 0) {
         return res.status(404).json({ message: "User not found" });
       }
 
       // Update user role
-      const user = await prisma.user.update({
-        where: { id: Number(id) },
-        data: { role },
-        select: {
-          id: true,
-          name: true,
-          email: true,
-          role: true,
-          createdAt: true,
-        },
-      });
+      const userResult = await query(
+        'UPDATE users SET role = $1 WHERE id = $2 RETURNING id, name, email, role, created_at',
+        [role, id]
+      );
 
-      res.status(200).json(user);
+      res.status(200).json(userResult.rows[0]);
     } catch (error) {
       console.error(error);
       res.status(500).json({ message: "Server error" });
@@ -775,20 +905,11 @@ app.patch(
 // Add a route for admins to get all users
 app.get("/users", authenticate, authorize(["ADMIN"]), async (req, res) => {
   try {
-    const users = await prisma.user.findMany({
-      select: {
-        id: true,
-        name: true,
-        email: true,
-        role: true,
-        createdAt: true,
-      },
-      orderBy: {
-        createdAt: "desc",
-      },
-    });
+    const users = await query(
+      'SELECT id, name, email, role, created_at FROM users ORDER BY created_at DESC'
+    );
 
-    res.json(users);
+    res.json(users.rows);
   } catch (error) {
     console.error(error);
     res.status(500).json({ message: "Server error" });
@@ -810,7 +931,14 @@ app.use((err, req, res, next) => {
   res.status(500).json({ message: "Server error", error: err.message });
 });
 
-// Start server
-app.listen(PORT, () => {
-  console.log(`Server running on port ${PORT} http://localhost:${PORT}`);
+// Initialize database before starting server
+initializeDatabase().then(() => {
+  // Start server
+  if (process.env.NODE_ENV !== 'production') {
+    app.listen(PORT, () => {
+      console.log(`Server running on port ${PORT}`);
+    });
+  }
 });
+
+module.exports = app;

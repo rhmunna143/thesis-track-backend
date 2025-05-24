@@ -5,16 +5,14 @@
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",
     "dev": "nodemon index.js",
-    "build": "prisma generate",
-    "migrate": "prisma migrate dev --name init",
-    "migrate-prod": "prisma migrate deploy",
-    "seed": "node prisma/seed.js"
+    "build": "echo \"No build step needed\"",
+    "start": "node index.js",
+    "seed": "node db/seed.js"
   },
   "keywords": [],
   "author": "",
   "license": "ISC",
   "dependencies": {
-    "@prisma/client": "^6.8.2",
     "bcrypt": "^6.0.0",
     "cors": "^2.8.5",
     "dotenv": "^16.5.0",
@@ -22,7 +20,7 @@
     "jsonwebtoken": "^9.0.2",
     "multer": "^2.0.0",
     "nodemailer": "^7.0.3",
-    "prisma": "^6.8.2"
+    "pg": "^8.11.3"
   },
   "description": ""
 }
