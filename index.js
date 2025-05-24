@@ -2,9 +2,6 @@ require("dotenv").config();
 const express = require("express");
 const jwt = require("jsonwebtoken");
 const bcrypt = require("bcrypt");
-const multer = require("multer");
-const path = require("path");
-const fs = require("fs");
 const nodemailer = require("nodemailer");
 const cors = require("cors");
 const { Pool } = require('pg');
@@ -914,21 +911,6 @@ app.get("/users", authenticate, authorize(["ADMIN"]), async (req, res) => {
     console.error(error);
     res.status(500).json({ message: "Server error" });
   }
-});
-
-// Error handling middleware
-app.use((err, req, res, next) => {
-  if (err instanceof multer.MulterError) {
-    if (err.code === "LIMIT_FILE_SIZE") {
-      return res
-        .status(400)
-        .json({ message: "File too large. Maximum size is 5MB." });
-    }
-    return res.status(400).json({ message: "File upload error" });
-  }
-
-  console.error(err.stack);
-  res.status(500).json({ message: "Server error", error: err.message });
 });
 
 // Initialize database before starting server
