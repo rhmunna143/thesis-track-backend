@@ -291,7 +291,6 @@ app.post(
   "/proposals",
   authenticate,
   authorize(["STUDENT"]),
-  upload.single("document"),
   async (req, res) => {
     try {
       // Check if there is an active session
@@ -305,10 +304,10 @@ app.post(
           .json({ message: "No active submission session" });
       }
 
-      const { title, abstract, supervisorId } = req.body;
+      const { title, abstract, supervisorId, documentUrl } = req.body;
 
       // Validation
-      if (!title || !abstract || !supervisorId || !req.file) {
+      if (!title || !abstract || !supervisorId || !documentUrl) {
         return res.status(400).json({ message: "All fields are required" });
       }
 
@@ -327,7 +326,7 @@ app.post(
           title,
           abstract,
           status: "PENDING",
-          documentUrl: req.file.path,
+          documentUrl, // Use the provided documentUrl directly
           student: { connect: { id: req.user.id } },
           supervisor: { connect: { id: Number(supervisorId) } },
         },
