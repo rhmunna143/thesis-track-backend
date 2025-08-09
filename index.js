@@ -78,7 +78,7 @@ app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
 
 // Initialize PostgreSQL connection pool
 const pool = new Pool({
-  connectionString: process.env.DATABASE_URL,
+  connectionString: process.env.NODE_ENV==="development" ? process.env.DATABASE_URL : process.env.LIVE_DATABASE_URL,
   ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false
 });
 
