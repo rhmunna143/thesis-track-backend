@@ -88,17 +88,17 @@ const query = (text, params) => pool.query(text, params);
 // Database initialization function
 async function initializeDatabase() {
   try {
-    // Create types - REMOVE "IF NOT EXISTS" from CREATE TYPE statements
-    await query(`
-      DO $$ BEGIN
-        CREATE TYPE user_role AS ENUM ('STUDENT', 'TEACHER', 'ADMIN');
-        CREATE TYPE proposal_status AS ENUM ('PENDING', 'APPROVED', 'REJECTED', 'REVISION_REQUIRED');
-        CREATE TYPE book_status AS ENUM ('PENDING', 'UNDER_REVIEW', 'APPROVED', 'REJECTED');
-        CREATE TYPE notification_type AS ENUM ('PROPOSAL_SUBMITTED', 'STATUS_CHANGED', 'COMMENT_ADDED', 'DEADLINE_REMINDER');
-      EXCEPTION
-        WHEN duplicate_object THEN null;
-      END $$;
-    `);
+    // Create types individually with proper error handling
+    const enumQueries = [
+      "DO $$ BEGIN CREATE TYPE user_role AS ENUM ('STUDENT', 'TEACHER', 'ADMIN'); EXCEPTION WHEN duplicate_object THEN null; END $$;",
+      "DO $$ BEGIN CREATE TYPE proposal_status AS ENUM ('PENDING', 'APPROVED', 'REJECTED', 'REVISION_REQUIRED'); EXCEPTION WHEN duplicate_object THEN null; END $$;",
+      "DO $$ BEGIN CREATE TYPE book_status AS ENUM ('PENDING', 'UNDER_REVIEW', 'APPROVED', 'REJECTED'); EXCEPTION WHEN duplicate_object THEN null; END $$;",
+      "DO $$ BEGIN CREATE TYPE notification_type AS ENUM ('PROPOSAL_SUBMITTED', 'STATUS_CHANGED', 'COMMENT_ADDED', 'DEADLINE_REMINDER'); EXCEPTION WHEN duplicate_object THEN null; END $$;"
+    ];
+
+    for (const enumQuery of enumQueries) {
+      await query(enumQuery);
+    }
 
     // Create users table
     await query(`
@@ -203,6 +203,24 @@ async function initializeDatabase() {
     await query(`CREATE INDEX IF NOT EXISTS idx_notifications_is_read ON notifications(is_read)`);
     
     console.log('Database initialized successfully');
+    
+    // Add missing columns if they don't exist (migration)
+    try {
+      // Check and add missing columns for users table
+      await query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS department VARCHAR(100)`);
+      await query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS student_id VARCHAR(50)`);
+      await query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS batch VARCHAR(20)`);
+      await query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS profile_picture VARCHAR(500)`);
+      await query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS bio TEXT`);
+      await query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS expertise TEXT[]`);
+      await query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS is_active BOOLEAN DEFAULT true`);
+      await query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS email_verified BOOLEAN DEFAULT false`);
+      await query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP DEFAULT NOW()`);
+      
+      console.log('Database schema migration completed successfully');
+    } catch (migrationError) {
+      console.error('Database migration error:', migrationError);
+    }
     
     // Create default admin if it doesn't exist
     const adminEmail = 'rhmunna19@gmail.com';
@@ -556,17 +574,17 @@ app.post(
 app.get("/proposals", authenticate, async (req, res) => {
   try {
     let proposals = [];
-    let query = '';
+    let sqlQuery = '';
     let params = [];
 
     if (req.user.role === "ADMIN") {
       // Admin sees all proposals
-      query = `
+      sqlQuery = `
         SELECT 
           p.id, p.title, p.abstract, p.status, p.document_url, 
           p.student_id, p.supervisor_id, p.created_at, p.updated_at,
-          s.id as student_id, s.name as student_name, s.email as student_email,
-          t.id as supervisor_id, t.name as supervisor_name, t.email as supervisor_email
+          s.id as s_id, s.name as student_name, s.email as student_email,
+          t.id as t_id, t.name as supervisor_name, t.email as supervisor_email
         FROM proposals p
         JOIN users s ON p.student_id = s.id
         JOIN users t ON p.supervisor_id = t.id
@@ -574,12 +592,12 @@ app.get("/proposals", authenticate, async (req, res) => {
       `;
     } else if (req.user.role === "TEACHER") {
       // Teachers see proposals where they're the supervisor
-      query = `
+      sqlQuery = `
         SELECT 
           p.id, p.title, p.abstract, p.status, p.document_url, 
           p.student_id, p.supervisor_id, p.created_at, p.updated_at,
-          s.id as student_id, s.name as student_name, s.email as student_email,
-          t.id as supervisor_id, t.name as supervisor_name, t.email as supervisor_email
+          s.id as s_id, s.name as student_name, s.email as student_email,
+          t.id as t_id, t.name as supervisor_name, t.email as supervisor_email
         FROM proposals p
         JOIN users s ON p.student_id = s.id
         JOIN users t ON p.supervisor_id = t.id
@@ -589,12 +607,12 @@ app.get("/proposals", authenticate, async (req, res) => {
       params = [req.user.id];
     } else if (req.user.role === "STUDENT") {
       // Students see their own proposals
-      query = `
+      sqlQuery = `
         SELECT 
           p.id, p.title, p.abstract, p.status, p.document_url, 
           p.student_id, p.supervisor_id, p.created_at, p.updated_at,
-          s.id as student_id, s.name as student_name, s.email as student_email,
-          t.id as supervisor_id, t.name as supervisor_name, t.email as supervisor_email
+          s.id as s_id, s.name as student_name, s.email as student_email,
+          t.id as t_id, t.name as supervisor_name, t.email as supervisor_email
         FROM proposals p
         JOIN users s ON p.student_id = s.id
         JOIN users t ON p.supervisor_id = t.id
@@ -604,7 +622,7 @@ app.get("/proposals", authenticate, async (req, res) => {
       params = [req.user.id];
     }
 
-    const result = await query(query, params);
+    const result = await query(sqlQuery, params);
     
     // Get comments for each proposal
     for (const row of result.rows) {
@@ -630,12 +648,12 @@ app.get("/proposals", authenticate, async (req, res) => {
         createdAt: row.created_at,
         updatedAt: row.updated_at,
         student: {
-          id: row.student_id,
+          id: row.s_id,
           name: row.student_name,
           email: row.student_email
         },
         supervisor: {
-          id: row.supervisor_id,
+          id: row.t_id,
           name: row.supervisor_name,
           email: row.supervisor_email
         },
@@ -1055,8 +1073,11 @@ app.get("/users/profile", authenticate, async (req, res) => {
 
     res.json(userResult.rows[0]);
   } catch (error) {
-    console.error(error);
-    res.status(500).json({ message: "Server error" });
+    console.error('GET /users/profile error:', error);
+    res.status(500).json({ 
+      message: "Server error",
+      ...(process.env.NODE_ENV === 'development' && { error: error.message })
+    });
   }
 });
 
