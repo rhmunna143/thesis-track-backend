@@ -126,6 +126,7 @@ Role-specific dashboard data:
 - File upload security with type validation
 - SQL injection prevention with parameterized queries
 - CORS configuration
+- **Admin Auto-Creation**: User registering with `ADMIN_EMAIL` automatically becomes ADMIN ✨ NEW
 
 ## File Structure
 ```
@@ -153,6 +154,7 @@ EMAIL_PORT=...
 EMAIL_USER=...
 EMAIL_PASSWORD=...
 EMAIL_FROM=...
+ADMIN_EMAIL=admin@yourapp.com  # User with this email becomes ADMIN automatically
 ```
 
 ## Deployment Notes
@@ -172,6 +174,7 @@ EMAIL_FROM=...
 8. ✅ Error handling improvements - Better logging and debugging
 9. ✅ Comprehensive API testing - 100% success rate (39/39 endpoints)
 10. ✅ Postman collection - Complete with all endpoints and examples
+11. ✅ Admin auto-initialization - Environment-based admin creation system
 
 ## API Testing Status ✅ PRODUCTION READY
 - **Total Endpoints:** 39

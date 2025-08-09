@@ -213,6 +213,9 @@ async function initializeDatabase() {
       await query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS profile_picture VARCHAR(500)`);
       await query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS bio TEXT`);
       await query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS expertise TEXT[]`);
+      await query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS contact_number VARCHAR(20)`);
+      await query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS linkedin_profile VARCHAR(255)`);
+      await query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS previous_project TEXT`);
       await query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS is_active BOOLEAN DEFAULT true`);
       await query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS email_verified BOOLEAN DEFAULT false`);
       await query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP DEFAULT NOW()`);
@@ -461,8 +464,14 @@ app.post("/auth/signup", async (req, res) => {
     // Hash password
     const hashedPassword = await bcrypt.hash(password, 12);
 
-    // Special case for admin email
-    const role = email === "rhmunna19@gmail.com" ? "ADMIN" : "STUDENT";
+    // Check if email matches admin email from environment variable
+    const adminEmail = process.env.ADMIN_EMAIL;
+    const role = (adminEmail && email.toLowerCase() === adminEmail.toLowerCase()) ? "ADMIN" : "STUDENT";
+    
+    // Log admin creation for security purposes
+    if (role === "ADMIN") {
+      console.log(`🔐 ADMIN user created with email: ${email}`);
+    }
 
     // Create user
     const result = await query(
@@ -1062,7 +1071,8 @@ app.get("/users/profile", authenticate, async (req, res) => {
   try {
     const userResult = await query(
       `SELECT id, name, email, role, department, student_id, batch, 
-              profile_picture, bio, expertise, is_active, email_verified, 
+              profile_picture, bio, expertise, contact_number, linkedin_profile, 
+              previous_project, is_active, email_verified, 
               created_at, updated_at FROM users WHERE id = $1`,
       [req.user.id]
     );
@@ -1083,7 +1093,18 @@ app.get("/users/profile", authenticate, async (req, res) => {
 
 app.put("/users/profile", authenticate, async (req, res) => {
   try {
-    const { name, department, bio, expertise, profilePicture } = req.body;
+    const { 
+      name, 
+      department, 
+      bio, 
+      expertise, 
+      profilePicture, 
+      studentId,
+      batch,
+      contactNumber,
+      linkedinProfile,
+      previousProject
+    } = req.body;
 
     // Validation
     if (!name) {
@@ -1092,12 +1113,16 @@ app.put("/users/profile", authenticate, async (req, res) => {
 
     const updateResult = await query(
       `UPDATE users 
-       SET name = $1, department = $2, bio = $3, expertise = $4, profile_picture = $5, updated_at = NOW()
-       WHERE id = $6 
+       SET name = $1, department = $2, bio = $3, expertise = $4, profile_picture = $5, 
+           student_id = $6, batch = $7, contact_number = $8, linkedin_profile = $9, 
+           previous_project = $10, updated_at = NOW()
+       WHERE id = $11 
        RETURNING id, name, email, role, department, student_id, batch, 
-                 profile_picture, bio, expertise, is_active, email_verified, 
+                 profile_picture, bio, expertise, contact_number, linkedin_profile, 
+                 previous_project, is_active, email_verified, 
                  created_at, updated_at`,
-      [name, department, bio, expertise, profilePicture, req.user.id]
+      [name, department, bio, expertise, profilePicture, studentId, batch, 
+       contactNumber, linkedinProfile, previousProject, req.user.id]
     );
 
     res.json(updateResult.rows[0]);
@@ -1113,7 +1138,8 @@ app.get("/users/:id", authenticate, async (req, res) => {
     
     const userResult = await query(
       `SELECT id, name, email, role, department, student_id, batch, 
-              profile_picture, bio, expertise, is_active, created_at 
+              profile_picture, bio, expertise, contact_number, linkedin_profile, 
+              previous_project, is_active, created_at 
        FROM users WHERE id = $1`,
       [id]
     );
@@ -1137,7 +1163,8 @@ app.get("/users", authenticate, authorize(["ADMIN"]), async (req, res) => {
 
     let baseQuery = `
       SELECT id, name, email, role, department, student_id, batch, 
-             profile_picture, is_active, created_at
+             profile_picture, contact_number, linkedin_profile, 
+             previous_project, is_active, created_at
       FROM users
     `;
     let countQuery = 'SELECT COUNT(*) as total FROM users';
