@@ -4,7 +4,10 @@ const jwt = require("jsonwebtoken");
 const bcrypt = require("bcrypt");
 const nodemailer = require("nodemailer");
 const cors = require("cors");
+const multer = require("multer");
 const { Pool } = require('pg');
+const path = require("path");
+const fs = require("fs");
 
 // Initialize Express app
 const app = express();
@@ -14,9 +17,68 @@ const PORT = process.env.PORT || 5000;
 app.use(cors());
 app.use(express.json());
 
+// Create uploads directory if it doesn't exist
+const uploadsDir = path.join(__dirname, 'uploads');
+if (!fs.existsSync(uploadsDir)) {
+  fs.mkdirSync(uploadsDir, { recursive: true });
+}
+
+// Configure multer for file uploads
+const storage = multer.diskStorage({
+  destination: (req, file, cb) => {
+    let uploadPath = 'uploads/';
+    if (file.fieldname === 'document') {
+      uploadPath += 'documents/';
+    } else if (file.fieldname === 'image' || file.fieldname === 'profile') {
+      uploadPath += 'images/';
+    }
+    
+    const fullPath = path.join(__dirname, uploadPath);
+    if (!fs.existsSync(fullPath)) {
+      fs.mkdirSync(fullPath, { recursive: true });
+    }
+    cb(null, uploadPath);
+  },
+  filename: (req, file, cb) => {
+    const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
+    cb(null, file.fieldname + '-' + uniqueSuffix + path.extname(file.originalname));
+  }
+});
+
+const fileFilter = (req, file, cb) => {
+  if (file.fieldname === 'document') {
+    // Allow PDF files for documents
+    if (file.mimetype === 'application/pdf') {
+      cb(null, true);
+    } else {
+      cb(new Error('Only PDF files are allowed for documents'), false);
+    }
+  } else if (file.fieldname === 'image' || file.fieldname === 'profile') {
+    // Allow image files
+    if (file.mimetype.startsWith('image/')) {
+      cb(null, true);
+    } else {
+      cb(new Error('Only image files are allowed'), false);
+    }
+  } else {
+    cb(new Error('Invalid field name'), false);
+  }
+};
+
+const upload = multer({
+  storage: storage,
+  fileFilter: fileFilter,
+  limits: {
+    fileSize: 10 * 1024 * 1024 // 10MB limit
+  }
+});
+
+// Serve static files from uploads directory
+app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
+
 // Initialize PostgreSQL connection pool
 const pool = new Pool({
-  connectionString: process.env.DATABASE_URL,
+  connectionString: process.env.NODE_ENV==="development" ? process.env.DATABASE_URL : process.env.LIVE_DATABASE_URL,
   ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false
 });
 
@@ -26,15 +88,17 @@ const query = (text, params) => pool.query(text, params);
 // Database initialization function
 async function initializeDatabase() {
   try {
-    // Create types - REMOVE "IF NOT EXISTS" from CREATE TYPE statements
-    await query(`
-      DO $$ BEGIN
-        CREATE TYPE user_role AS ENUM ('STUDENT', 'TEACHER', 'ADMIN');
-        CREATE TYPE proposal_status AS ENUM ('PENDING', 'APPROVED', 'REJECTED', 'REVISION_REQUIRED');
-      EXCEPTION
-        WHEN duplicate_object THEN null;
-      END $$;
-    `);
+    // Create types individually with proper error handling
+    const enumQueries = [
+      "DO $$ BEGIN CREATE TYPE user_role AS ENUM ('STUDENT', 'TEACHER', 'ADMIN'); EXCEPTION WHEN duplicate_object THEN null; END $$;",
+      "DO $$ BEGIN CREATE TYPE proposal_status AS ENUM ('PENDING', 'APPROVED', 'REJECTED', 'REVISION_REQUIRED'); EXCEPTION WHEN duplicate_object THEN null; END $$;",
+      "DO $$ BEGIN CREATE TYPE book_status AS ENUM ('PENDING', 'UNDER_REVIEW', 'APPROVED', 'REJECTED'); EXCEPTION WHEN duplicate_object THEN null; END $$;",
+      "DO $$ BEGIN CREATE TYPE notification_type AS ENUM ('PROPOSAL_SUBMITTED', 'STATUS_CHANGED', 'COMMENT_ADDED', 'DEADLINE_REMINDER'); EXCEPTION WHEN duplicate_object THEN null; END $$;"
+    ];
+
+    for (const enumQuery of enumQueries) {
+      await query(enumQuery);
+    }
 
     // Create users table
     await query(`
@@ -44,7 +108,16 @@ async function initializeDatabase() {
         email VARCHAR(255) UNIQUE NOT NULL,
         password VARCHAR(255) NOT NULL,
         role user_role NOT NULL,
-        created_at TIMESTAMP NOT NULL DEFAULT NOW()
+        department VARCHAR(100),
+        student_id VARCHAR(50),
+        batch VARCHAR(20),
+        profile_picture VARCHAR(500),
+        bio TEXT,
+        expertise TEXT[],
+        is_active BOOLEAN DEFAULT true,
+        email_verified BOOLEAN DEFAULT false,
+        created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+        updated_at TIMESTAMP DEFAULT NOW()
       )
     `);
 
@@ -80,7 +153,43 @@ async function initializeDatabase() {
         content TEXT NOT NULL,
         proposal_id INTEGER NOT NULL REFERENCES proposals(id),
         commenter_id INTEGER NOT NULL REFERENCES users(id),
-        created_at TIMESTAMP NOT NULL DEFAULT NOW()
+        parent_comment_id INTEGER REFERENCES comments(id),
+        is_resolved BOOLEAN DEFAULT false,
+        created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+        updated_at TIMESTAMP NOT NULL DEFAULT NOW()
+      )
+    `);
+
+    // Create project_books table
+    await query(`
+      CREATE TABLE IF NOT EXISTS project_books (
+        id SERIAL PRIMARY KEY,
+        proposal_id INTEGER NOT NULL REFERENCES proposals(id),
+        document_url VARCHAR(500) NOT NULL,
+        presentation_url VARCHAR(500),
+        source_code_url VARCHAR(500),
+        status book_status DEFAULT 'PENDING',
+        review_score INTEGER CHECK (review_score >= 0 AND review_score <= 100),
+        review_comments TEXT,
+        reviewed_by INTEGER REFERENCES users(id),
+        submitted_at TIMESTAMP DEFAULT NOW(),
+        reviewed_at TIMESTAMP,
+        created_at TIMESTAMP DEFAULT NOW(),
+        updated_at TIMESTAMP DEFAULT NOW()
+      )
+    `);
+
+    // Create notifications table
+    await query(`
+      CREATE TABLE IF NOT EXISTS notifications (
+        id SERIAL PRIMARY KEY,
+        user_id INTEGER NOT NULL REFERENCES users(id),
+        type notification_type NOT NULL,
+        title VARCHAR(255) NOT NULL,
+        message TEXT NOT NULL,
+        is_read BOOLEAN DEFAULT false,
+        metadata JSONB,
+        created_at TIMESTAMP DEFAULT NOW()
       )
     `);
 
@@ -88,8 +197,33 @@ async function initializeDatabase() {
     await query(`CREATE INDEX IF NOT EXISTS idx_proposals_student_id ON proposals(student_id)`);
     await query(`CREATE INDEX IF NOT EXISTS idx_proposals_supervisor_id ON proposals(supervisor_id)`);
     await query(`CREATE INDEX IF NOT EXISTS idx_comments_proposal_id ON comments(proposal_id)`);
+    await query(`CREATE INDEX IF NOT EXISTS idx_project_books_proposal_id ON project_books(proposal_id)`);
+    await query(`CREATE INDEX IF NOT EXISTS idx_project_books_status ON project_books(status)`);
+    await query(`CREATE INDEX IF NOT EXISTS idx_notifications_user_id ON notifications(user_id)`);
+    await query(`CREATE INDEX IF NOT EXISTS idx_notifications_is_read ON notifications(is_read)`);
     
     console.log('Database initialized successfully');
+    
+    // Add missing columns if they don't exist (migration)
+    try {
+      // Check and add missing columns for users table
+      await query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS department VARCHAR(100)`);
+      await query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS student_id VARCHAR(50)`);
+      await query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS batch VARCHAR(20)`);
+      await query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS profile_picture VARCHAR(500)`);
+      await query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS bio TEXT`);
+      await query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS expertise TEXT[]`);
+      await query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS contact_number VARCHAR(20)`);
+      await query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS linkedin_profile VARCHAR(255)`);
+      await query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS previous_project TEXT`);
+      await query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS is_active BOOLEAN DEFAULT true`);
+      await query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS email_verified BOOLEAN DEFAULT false`);
+      await query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP DEFAULT NOW()`);
+      
+      console.log('Database schema migration completed successfully');
+    } catch (migrationError) {
+      console.error('Database migration error:', migrationError);
+    }
     
     // Create default admin if it doesn't exist
     const adminEmail = 'rhmunna19@gmail.com';
@@ -330,8 +464,14 @@ app.post("/auth/signup", async (req, res) => {
     // Hash password
     const hashedPassword = await bcrypt.hash(password, 12);
 
-    // Special case for admin email
-    const role = email === "rhmunna19@gmail.com" ? "ADMIN" : "STUDENT";
+    // Check if email matches admin email from environment variable
+    const adminEmail = process.env.ADMIN_EMAIL;
+    const role = (adminEmail && email.toLowerCase() === adminEmail.toLowerCase()) ? "ADMIN" : "STUDENT";
+    
+    // Log admin creation for security purposes
+    if (role === "ADMIN") {
+      console.log(`🔐 ADMIN user created with email: ${email}`);
+    }
 
     // Create user
     const result = await query(
@@ -416,6 +556,15 @@ app.post(
        <p>Please log in to the ThesisTrack system to review this proposal.</p>`
       );
 
+      // Create notification for supervisor
+      await createNotification(
+        supervisorId,
+        'PROPOSAL_SUBMITTED',
+        'New Proposal Submitted',
+        `${student.name} has submitted a new thesis proposal: "${title}"`,
+        { proposalId: proposal.id, studentId: req.user.id }
+      );
+
       // Format response to match the format expected by frontend
       const result = {
         ...proposal,
@@ -434,17 +583,17 @@ app.post(
 app.get("/proposals", authenticate, async (req, res) => {
   try {
     let proposals = [];
-    let query = '';
+    let sqlQuery = '';
     let params = [];
 
     if (req.user.role === "ADMIN") {
       // Admin sees all proposals
-      query = `
+      sqlQuery = `
         SELECT 
           p.id, p.title, p.abstract, p.status, p.document_url, 
           p.student_id, p.supervisor_id, p.created_at, p.updated_at,
-          s.id as student_id, s.name as student_name, s.email as student_email,
-          t.id as supervisor_id, t.name as supervisor_name, t.email as supervisor_email
+          s.id as s_id, s.name as student_name, s.email as student_email,
+          t.id as t_id, t.name as supervisor_name, t.email as supervisor_email
         FROM proposals p
         JOIN users s ON p.student_id = s.id
         JOIN users t ON p.supervisor_id = t.id
@@ -452,12 +601,12 @@ app.get("/proposals", authenticate, async (req, res) => {
       `;
     } else if (req.user.role === "TEACHER") {
       // Teachers see proposals where they're the supervisor
-      query = `
+      sqlQuery = `
         SELECT 
           p.id, p.title, p.abstract, p.status, p.document_url, 
           p.student_id, p.supervisor_id, p.created_at, p.updated_at,
-          s.id as student_id, s.name as student_name, s.email as student_email,
-          t.id as supervisor_id, t.name as supervisor_name, t.email as supervisor_email
+          s.id as s_id, s.name as student_name, s.email as student_email,
+          t.id as t_id, t.name as supervisor_name, t.email as supervisor_email
         FROM proposals p
         JOIN users s ON p.student_id = s.id
         JOIN users t ON p.supervisor_id = t.id
@@ -467,12 +616,12 @@ app.get("/proposals", authenticate, async (req, res) => {
       params = [req.user.id];
     } else if (req.user.role === "STUDENT") {
       // Students see their own proposals
-      query = `
+      sqlQuery = `
         SELECT 
           p.id, p.title, p.abstract, p.status, p.document_url, 
           p.student_id, p.supervisor_id, p.created_at, p.updated_at,
-          s.id as student_id, s.name as student_name, s.email as student_email,
-          t.id as supervisor_id, t.name as supervisor_name, t.email as supervisor_email
+          s.id as s_id, s.name as student_name, s.email as student_email,
+          t.id as t_id, t.name as supervisor_name, t.email as supervisor_email
         FROM proposals p
         JOIN users s ON p.student_id = s.id
         JOIN users t ON p.supervisor_id = t.id
@@ -482,7 +631,7 @@ app.get("/proposals", authenticate, async (req, res) => {
       params = [req.user.id];
     }
 
-    const result = await query(query, params);
+    const result = await query(sqlQuery, params);
     
     // Get comments for each proposal
     for (const row of result.rows) {
@@ -508,12 +657,12 @@ app.get("/proposals", authenticate, async (req, res) => {
         createdAt: row.created_at,
         updatedAt: row.updated_at,
         student: {
-          id: row.student_id,
+          id: row.s_id,
           name: row.student_name,
           email: row.student_email
         },
         supervisor: {
-          id: row.supervisor_id,
+          id: row.t_id,
           name: row.supervisor_name,
           email: row.supervisor_email
         },
@@ -602,6 +751,15 @@ app.patch(
         `<p>Dear ${proposal.student_name},</p>
        <p>The status of your thesis proposal has been updated to <strong>${status}</strong> by ${req.user.name}.</p>
        <p>Please log in to the ThesisTrack system for more details.</p>`
+      );
+
+      // Create notification for student
+      await createNotification(
+        proposal.student_id,
+        'STATUS_CHANGED',
+        'Proposal Status Updated',
+        `Your proposal status has been updated to ${status}`,
+        { proposalId: parseInt(id), status, reviewerId: req.user.id }
       );
 
       // Format response
@@ -723,6 +881,193 @@ app.patch(
   }
 );
 
+// Get proposal by ID
+app.get("/proposals/:id", authenticate, async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    // Get proposal with student and supervisor details
+    const proposalResult = await query(
+      `SELECT 
+        p.id, p.title, p.abstract, p.status, p.document_url, 
+        p.student_id, p.supervisor_id, p.created_at, p.updated_at,
+        s.id as s_id, s.name as student_name, s.email as student_email,
+        t.id as t_id, t.name as supervisor_name, t.email as supervisor_email
+      FROM proposals p
+      JOIN users s ON p.student_id = s.id
+      JOIN users t ON p.supervisor_id = t.id
+      WHERE p.id = $1`,
+      [id]
+    );
+
+    if (proposalResult.rows.length === 0) {
+      return res.status(404).json({ message: "Proposal not found" });
+    }
+
+    const proposal = proposalResult.rows[0];
+
+    // Check access permissions
+    if (req.user.role === "STUDENT" && proposal.student_id !== req.user.id) {
+      return res.status(403).json({ message: "Access denied" });
+    }
+    if (req.user.role === "TEACHER" && proposal.supervisor_id !== req.user.id) {
+      return res.status(403).json({ message: "Access denied" });
+    }
+
+    // Get comments for this proposal
+    const commentsResult = await query(
+      `SELECT c.id, c.content, c.commenter_id, c.created_at, 
+       u.name as commenter_name, u.role as commenter_role
+       FROM comments c
+       JOIN users u ON c.commenter_id = u.id
+       WHERE c.proposal_id = $1
+       ORDER BY c.created_at DESC`,
+      [id]
+    );
+
+    // Format the response
+    const result = {
+      id: proposal.id,
+      title: proposal.title,
+      abstract: proposal.abstract,
+      status: proposal.status,
+      documentUrl: proposal.document_url,
+      studentId: proposal.student_id,
+      supervisorId: proposal.supervisor_id,
+      createdAt: proposal.created_at,
+      updatedAt: proposal.updated_at,
+      student: {
+        id: proposal.s_id,
+        name: proposal.student_name,
+        email: proposal.student_email
+      },
+      supervisor: {
+        id: proposal.t_id,
+        name: proposal.supervisor_name,
+        email: proposal.supervisor_email
+      },
+      comments: commentsResult.rows.map(c => ({
+        id: c.id,
+        content: c.content,
+        commenterId: c.commenter_id,
+        createdAt: c.created_at,
+        commenter: {
+          id: c.commenter_id,
+          name: c.commenter_name,
+          role: c.commenter_role
+        }
+      }))
+    };
+
+    res.json(result);
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ message: "Server error" });
+  }
+});
+
+// Delete proposal
+app.delete("/proposals/:id", authenticate, async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    // Get proposal details first
+    const proposalResult = await query(
+      'SELECT * FROM proposals WHERE id = $1',
+      [id]
+    );
+
+    if (proposalResult.rows.length === 0) {
+      return res.status(404).json({ message: "Proposal not found" });
+    }
+
+    const proposal = proposalResult.rows[0];
+
+    // Check permissions
+    if (req.user.role === "STUDENT") {
+      // Students can only delete their own proposals
+      if (proposal.student_id !== req.user.id) {
+        return res.status(403).json({ message: "You can only delete your own proposals" });
+      }
+      // Students can only delete pending proposals
+      if (proposal.status !== 'PENDING') {
+        return res.status(400).json({ message: "You can only delete pending proposals" });
+      }
+    }
+    // Admins can delete any proposal (no additional checks needed)
+
+    // Delete related comments first (due to foreign key constraints)
+    await query('DELETE FROM comments WHERE proposal_id = $1', [id]);
+
+    // Delete the proposal
+    await query('DELETE FROM proposals WHERE id = $1', [id]);
+
+    res.json({ message: "Proposal deleted successfully" });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ message: "Server error" });
+  }
+});
+
+// Get comments for a specific proposal
+app.get("/proposals/:id/comments", authenticate, async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    // First check if proposal exists and user has access
+    const proposalResult = await query(
+      'SELECT student_id, supervisor_id FROM proposals WHERE id = $1',
+      [id]
+    );
+
+    if (proposalResult.rows.length === 0) {
+      return res.status(404).json({ message: "Proposal not found" });
+    }
+
+    const proposal = proposalResult.rows[0];
+
+    // Check access permissions
+    if (req.user.role === "STUDENT" && proposal.student_id !== req.user.id) {
+      return res.status(403).json({ message: "Access denied" });
+    }
+    if (req.user.role === "TEACHER" && proposal.supervisor_id !== req.user.id) {
+      return res.status(403).json({ message: "Access denied" });
+    }
+
+    // Get comments for this proposal
+    const commentsResult = await query(
+      `SELECT c.id, c.content, c.commenter_id, c.parent_comment_id, 
+              c.is_resolved, c.created_at, c.updated_at,
+       u.name as commenter_name, u.role as commenter_role
+       FROM comments c
+       JOIN users u ON c.commenter_id = u.id
+       WHERE c.proposal_id = $1
+       ORDER BY c.created_at ASC`,
+      [id]
+    );
+
+    const comments = commentsResult.rows.map(c => ({
+      id: c.id,
+      content: c.content,
+      commenterId: c.commenter_id,
+      parentCommentId: c.parent_comment_id,
+      isResolved: c.is_resolved,
+      createdAt: c.created_at,
+      updatedAt: c.updated_at,
+      commenter: {
+        id: c.commenter_id,
+        name: c.commenter_name,
+        role: c.commenter_role
+      }
+    }));
+
+    res.json(comments);
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ message: "Server error" });
+  }
+});
+
 // COMMENT ROUTES
 app.post(
   "/comments",
@@ -793,6 +1138,15 @@ app.post(
        <p>${req.user.name} has commented on your thesis proposal <strong>"${proposal.title}"</strong>.</p>
        <p>Comment: "${content}"</p>
        <p>Please log in to the ThesisTrack system to view the comment and respond if necessary.</p>`
+      );
+
+      // Create notification for student
+      await createNotification(
+        proposal.student_id,
+        'COMMENT_ADDED',
+        'New Comment Added',
+        `${req.user.name} commented on your proposal: "${proposal.title}"`,
+        { proposalId: parseInt(proposalId), commentId: comment.id, commenterId: req.user.id }
       );
 
       // Format response
@@ -899,19 +1253,776 @@ app.patch(
   }
 );
 
-// Add a route for admins to get all users
-app.get("/users", authenticate, authorize(["ADMIN"]), async (req, res) => {
+// USER PROFILE ROUTES
+app.get("/users/profile", authenticate, async (req, res) => {
   try {
-    const users = await query(
-      'SELECT id, name, email, role, created_at FROM users ORDER BY created_at DESC'
+    const userResult = await query(
+      `SELECT id, name, email, role, department, student_id, batch, 
+              profile_picture, bio, expertise, contact_number, linkedin_profile, 
+              previous_project, is_active, email_verified, 
+              created_at, updated_at FROM users WHERE id = $1`,
+      [req.user.id]
     );
 
-    res.json(users.rows);
+    if (userResult.rows.length === 0) {
+      return res.status(404).json({ message: "User not found" });
+    }
+
+    res.json(userResult.rows[0]);
+  } catch (error) {
+    console.error('GET /users/profile error:', error);
+    res.status(500).json({ 
+      message: "Server error",
+      ...(process.env.NODE_ENV === 'development' && { error: error.message })
+    });
+  }
+});
+
+app.put("/users/profile", authenticate, async (req, res) => {
+  try {
+    const { 
+      name, 
+      department, 
+      bio, 
+      expertise, 
+      profilePicture, 
+      studentId,
+      batch,
+      contactNumber,
+      linkedinProfile,
+      previousProject
+    } = req.body;
+
+    // Validation
+    if (!name) {
+      return res.status(400).json({ message: "Name is required" });
+    }
+
+    const updateResult = await query(
+      `UPDATE users 
+       SET name = $1, department = $2, bio = $3, expertise = $4, profile_picture = $5, 
+           student_id = $6, batch = $7, contact_number = $8, linkedin_profile = $9, 
+           previous_project = $10, updated_at = NOW()
+       WHERE id = $11 
+       RETURNING id, name, email, role, department, student_id, batch, 
+                 profile_picture, bio, expertise, contact_number, linkedin_profile, 
+                 previous_project, is_active, email_verified, 
+                 created_at, updated_at`,
+      [name, department, bio, expertise, profilePicture, studentId, batch, 
+       contactNumber, linkedinProfile, previousProject, req.user.id]
+    );
+
+    res.json(updateResult.rows[0]);
   } catch (error) {
     console.error(error);
     res.status(500).json({ message: "Server error" });
   }
 });
+
+app.get("/users/:id", authenticate, async (req, res) => {
+  try {
+    const { id } = req.params;
+    
+    const userResult = await query(
+      `SELECT id, name, email, role, department, student_id, batch, 
+              profile_picture, bio, expertise, contact_number, linkedin_profile, 
+              previous_project, is_active, created_at 
+       FROM users WHERE id = $1`,
+      [id]
+    );
+
+    if (userResult.rows.length === 0) {
+      return res.status(404).json({ message: "User not found" });
+    }
+
+    res.json(userResult.rows[0]);
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ message: "Server error" });
+  }
+});
+
+// Add a route for admins to get all users with pagination and filtering
+app.get("/users", authenticate, authorize(["ADMIN"]), async (req, res) => {
+  try {
+    const { page = 1, limit = 20, role, department, search } = req.query;
+    const offset = (page - 1) * limit;
+
+    let baseQuery = `
+      SELECT id, name, email, role, department, student_id, batch, 
+             profile_picture, contact_number, linkedin_profile, 
+             previous_project, is_active, created_at
+      FROM users
+    `;
+    let countQuery = 'SELECT COUNT(*) as total FROM users';
+    let params = [];
+    let whereConditions = [];
+
+    if (role) {
+      whereConditions.push(`role = $${params.length + 1}`);
+      params.push(role);
+    }
+
+    if (department) {
+      whereConditions.push(`department = $${params.length + 1}`);
+      params.push(department);
+    }
+
+    if (search) {
+      whereConditions.push(`(name ILIKE $${params.length + 1} OR email ILIKE $${params.length + 1})`);
+      params.push(`%${search}%`);
+    }
+
+    if (whereConditions.length > 0) {
+      const whereClause = ` WHERE ${whereConditions.join(' AND ')}`;
+      baseQuery += whereClause;
+      countQuery += whereClause;
+    }
+
+    baseQuery += ` ORDER BY created_at DESC LIMIT $${params.length + 1} OFFSET $${params.length + 2}`;
+    params.push(limit, offset);
+
+    const usersResult = await query(baseQuery, params);
+    const countResult = await query(countQuery, params.slice(0, -2)); // Remove limit and offset params for count
+    const total = parseInt(countResult.rows[0].total);
+
+    res.json({
+      data: usersResult.rows,
+      pagination: {
+        page: parseInt(page),
+        limit: parseInt(limit),
+        total,
+        totalPages: Math.ceil(total / limit)
+      }
+    });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ message: "Server error" });
+  }
+});
+
+// Get all teachers for student selection
+app.get("/teachers", authenticate, async (req, res) => {
+  try {
+    const { department, search } = req.query;
+    
+    let teachersQuery = `
+      SELECT id, name, email, department, bio, expertise, profile_picture
+      FROM users 
+      WHERE role = 'TEACHER' AND is_active = true
+    `;
+    let params = [];
+
+    if (department) {
+      teachersQuery += ` AND department = $${params.length + 1}`;
+      params.push(department);
+    }
+
+    if (search) {
+      teachersQuery += ` AND (name ILIKE $${params.length + 1} OR email ILIKE $${params.length + 1})`;
+      params.push(`%${search}%`);
+    }
+
+    teachersQuery += ` ORDER BY name ASC`;
+
+    const result = await query(teachersQuery, params);
+    res.json(result.rows);
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ message: "Server error" });
+  }
+});
+
+// Get all departments
+app.get("/departments", authenticate, async (req, res) => {
+  try {
+    const departmentsResult = await query(`
+      SELECT DISTINCT department 
+      FROM users 
+      WHERE department IS NOT NULL 
+        AND department != '' 
+        AND is_active = true
+      ORDER BY department ASC
+    `);
+
+    // Extract just the department names
+    const departments = departmentsResult.rows.map(row => row.department);
+    
+    res.json(departments);
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ message: "Server error" });
+  }
+});
+
+// PROJECT BOOKS ROUTES
+app.post("/project-books", authenticate, authorize(["STUDENT"]), async (req, res) => {
+  try {
+    const { proposalId, documentUrl, presentationUrl, sourceCodeUrl } = req.body;
+
+    // Validation
+    if (!proposalId || !documentUrl) {
+      return res.status(400).json({ message: "Proposal ID and document URL are required" });
+    }
+
+    // Check if proposal exists and belongs to the student
+    const proposalResult = await query(
+      'SELECT * FROM proposals WHERE id = $1 AND student_id = $2 AND status = $3',
+      [proposalId, req.user.id, 'APPROVED']
+    );
+
+    if (proposalResult.rows.length === 0) {
+      return res.status(404).json({ message: "Approved proposal not found or access denied" });
+    }
+
+    // Check if project book already exists for this proposal
+    const existingBook = await query(
+      'SELECT * FROM project_books WHERE proposal_id = $1',
+      [proposalId]
+    );
+
+    if (existingBook.rows.length > 0) {
+      return res.status(400).json({ message: "Project book already exists for this proposal" });
+    }
+
+    // Create project book
+    const bookResult = await query(
+      `INSERT INTO project_books (proposal_id, document_url, presentation_url, source_code_url) 
+       VALUES ($1, $2, $3, $4) 
+       RETURNING *`,
+      [proposalId, documentUrl, presentationUrl, sourceCodeUrl]
+    );
+
+    res.status(201).json(bookResult.rows[0]);
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ message: "Server error" });
+  }
+});
+
+app.get("/project-books", authenticate, async (req, res) => {
+  try {
+    let booksQuery = '';
+    let params = [];
+
+    if (req.user.role === "ADMIN") {
+      booksQuery = `
+        SELECT pb.*, p.title as proposal_title, s.name as student_name, s.email as student_email,
+               t.name as supervisor_name, r.name as reviewer_name
+        FROM project_books pb
+        JOIN proposals p ON pb.proposal_id = p.id
+        JOIN users s ON p.student_id = s.id
+        JOIN users t ON p.supervisor_id = t.id
+        LEFT JOIN users r ON pb.reviewed_by = r.id
+        ORDER BY pb.created_at DESC
+      `;
+    } else if (req.user.role === "TEACHER") {
+      booksQuery = `
+        SELECT pb.*, p.title as proposal_title, s.name as student_name, s.email as student_email,
+               t.name as supervisor_name, r.name as reviewer_name
+        FROM project_books pb
+        JOIN proposals p ON pb.proposal_id = p.id
+        JOIN users s ON p.student_id = s.id
+        JOIN users t ON p.supervisor_id = t.id
+        LEFT JOIN users r ON pb.reviewed_by = r.id
+        WHERE p.supervisor_id = $1
+        ORDER BY pb.created_at DESC
+      `;
+      params = [req.user.id];
+    } else if (req.user.role === "STUDENT") {
+      booksQuery = `
+        SELECT pb.*, p.title as proposal_title, s.name as student_name, s.email as student_email,
+               t.name as supervisor_name, r.name as reviewer_name
+        FROM project_books pb
+        JOIN proposals p ON pb.proposal_id = p.id
+        JOIN users s ON p.student_id = s.id
+        JOIN users t ON p.supervisor_id = t.id
+        LEFT JOIN users r ON pb.reviewed_by = r.id
+        WHERE s.id = $1
+        ORDER BY pb.created_at DESC
+      `;
+      params = [req.user.id];
+    }
+
+    const result = await query(booksQuery, params);
+    res.json(result.rows);
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ message: "Server error" });
+  }
+});
+
+app.get("/project-books/:id", authenticate, async (req, res) => {
+  try {
+    const { id } = req.params;
+    
+    const bookResult = await query(
+      `SELECT pb.*, p.title as proposal_title, p.abstract, s.name as student_name, s.email as student_email,
+             t.name as supervisor_name, r.name as reviewer_name
+       FROM project_books pb
+       JOIN proposals p ON pb.proposal_id = p.id
+       JOIN users s ON p.student_id = s.id
+       JOIN users t ON p.supervisor_id = t.id
+       LEFT JOIN users r ON pb.reviewed_by = r.id
+       WHERE pb.id = $1`,
+      [id]
+    );
+
+    if (bookResult.rows.length === 0) {
+      return res.status(404).json({ message: "Project book not found" });
+    }
+
+    const book = bookResult.rows[0];
+
+    // Check access permissions
+    if (req.user.role === "STUDENT" && book.student_name !== req.user.name) {
+      return res.status(403).json({ message: "Access denied" });
+    }
+    if (req.user.role === "TEACHER" && book.supervisor_name !== req.user.name) {
+      return res.status(403).json({ message: "Access denied" });
+    }
+
+    res.json(book);
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ message: "Server error" });
+  }
+});
+
+app.patch("/project-books/:id/review", authenticate, authorize(["TEACHER", "ADMIN"]), async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { status, reviewScore, reviewComments } = req.body;
+
+    // Validation
+    const validStatuses = ["PENDING", "UNDER_REVIEW", "APPROVED", "REJECTED"];
+    if (!status || !validStatuses.includes(status)) {
+      return res.status(400).json({ message: "Valid status is required" });
+    }
+
+    if (reviewScore && (reviewScore < 0 || reviewScore > 100)) {
+      return res.status(400).json({ message: "Review score must be between 0 and 100" });
+    }
+
+    // Check if project book exists
+    const bookResult = await query(
+      `SELECT pb.*, p.student_id, p.supervisor_id, s.name as student_name, s.email as student_email
+       FROM project_books pb
+       JOIN proposals p ON pb.proposal_id = p.id
+       JOIN users s ON p.student_id = s.id
+       WHERE pb.id = $1`,
+      [id]
+    );
+
+    if (bookResult.rows.length === 0) {
+      return res.status(404).json({ message: "Project book not found" });
+    }
+
+    const book = bookResult.rows[0];
+
+    // Check if teacher is the supervisor (unless admin)
+    if (req.user.role === "TEACHER" && book.supervisor_id !== req.user.id) {
+      return res.status(403).json({ message: "You can only review project books you supervise" });
+    }
+
+    // Update project book
+    const updateResult = await query(
+      `UPDATE project_books 
+       SET status = $1, review_score = $2, review_comments = $3, reviewed_by = $4, reviewed_at = NOW(), updated_at = NOW()
+       WHERE id = $5 
+       RETURNING *`,
+      [status, reviewScore, reviewComments, req.user.id, id]
+    );
+
+    // Send notification email to student
+    await sendEmail(
+      book.student_email,
+      `Project Book Review Update: ${status}`,
+      `Dear ${book.student_name},\n\nYour project book has been reviewed and the status has been updated to ${status}.${reviewComments ? '\n\nReviewer Comments: ' + reviewComments : ''}${reviewScore ? '\n\nScore: ' + reviewScore + '/100' : ''}`,
+      `<p>Dear ${book.student_name},</p>
+       <p>Your project book has been reviewed and the status has been updated to <strong>${status}</strong>.</p>
+       ${reviewComments ? '<p><strong>Reviewer Comments:</strong> ' + reviewComments + '</p>' : ''}
+       ${reviewScore ? '<p><strong>Score:</strong> ' + reviewScore + '/100</p>' : ''}
+       <p>Please log in to the ThesisTrack system for more details.</p>`
+    );
+
+    res.json(updateResult.rows[0]);
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ message: "Server error" });
+  }
+});
+
+// NOTIFICATIONS ROUTES
+app.get("/notifications", authenticate, async (req, res) => {
+  try {
+    const { page = 1, limit = 20, unreadOnly = false } = req.query;
+    const offset = (page - 1) * limit;
+
+    let notificationsQuery = `
+      SELECT * FROM notifications 
+      WHERE user_id = $1
+    `;
+    let params = [req.user.id];
+
+    if (unreadOnly === 'true') {
+      notificationsQuery += ' AND is_read = false';
+    }
+
+    notificationsQuery += ` ORDER BY created_at DESC LIMIT $${params.length + 1} OFFSET $${params.length + 2}`;
+    params.push(limit, offset);
+
+    const result = await query(notificationsQuery, params);
+    
+    // Get total count
+    const countQuery = `
+      SELECT COUNT(*) as total FROM notifications 
+      WHERE user_id = $1 ${unreadOnly === 'true' ? 'AND is_read = false' : ''}
+    `;
+    const countResult = await query(countQuery, [req.user.id]);
+    const total = parseInt(countResult.rows[0].total);
+
+    res.json({
+      data: result.rows,
+      pagination: {
+        page: parseInt(page),
+        limit: parseInt(limit),
+        total,
+        totalPages: Math.ceil(total / limit)
+      }
+    });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ message: "Server error" });
+  }
+});
+
+app.patch("/notifications/:id/read", authenticate, async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    const result = await query(
+      'UPDATE notifications SET is_read = true WHERE id = $1 AND user_id = $2 RETURNING *',
+      [id, req.user.id]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ message: "Notification not found" });
+    }
+
+    res.json(result.rows[0]);
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ message: "Server error" });
+  }
+});
+
+app.patch("/notifications/mark-all-read", authenticate, async (req, res) => {
+  try {
+    await query(
+      'UPDATE notifications SET is_read = true WHERE user_id = $1 AND is_read = false',
+      [req.user.id]
+    );
+
+    res.json({ message: "All notifications marked as read" });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ message: "Server error" });
+  }
+});
+
+// FILE UPLOAD ROUTES
+app.post("/upload/document", authenticate, upload.single('document'), async (req, res) => {
+  try {
+    if (!req.file) {
+      return res.status(400).json({ message: "No document file uploaded" });
+    }
+
+    const fileUrl = `/uploads/documents/${req.file.filename}`;
+    
+    res.json({
+      url: fileUrl,
+      originalName: req.file.originalname,
+      size: req.file.size,
+      mimeType: req.file.mimetype
+    });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ message: "Server error" });
+  }
+});
+
+app.post("/upload/image", authenticate, upload.single('image'), async (req, res) => {
+  try {
+    if (!req.file) {
+      return res.status(400).json({ message: "No image file uploaded" });
+    }
+
+    const fileUrl = `/uploads/images/${req.file.filename}`;
+    
+    res.json({
+      url: fileUrl,
+      originalName: req.file.originalname,
+      size: req.file.size,
+      mimeType: req.file.mimetype
+    });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ message: "Server error" });
+  }
+});
+
+app.post("/upload/profile", authenticate, upload.single('profile'), async (req, res) => {
+  try {
+    if (!req.file) {
+      return res.status(400).json({ message: "No profile image uploaded" });
+    }
+
+    const fileUrl = `/uploads/images/${req.file.filename}`;
+    
+    // Update user's profile picture in database
+    await query(
+      'UPDATE users SET profile_picture = $1 WHERE id = $2',
+      [fileUrl, req.user.id]
+    );
+    
+    res.json({
+      url: fileUrl,
+      originalName: req.file.originalname,
+      size: req.file.size,
+      mimeType: req.file.mimetype
+    });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ message: "Server error" });
+  }
+});
+
+app.delete("/upload/:filename", authenticate, async (req, res) => {
+  try {
+    const { filename } = req.params;
+    const { type = 'document' } = req.query; // document or image
+    
+    let filePath;
+    if (type === 'image') {
+      filePath = path.join(__dirname, 'uploads', 'images', filename);
+    } else {
+      filePath = path.join(__dirname, 'uploads', 'documents', filename);
+    }
+
+    // Check if file exists
+    if (!fs.existsSync(filePath)) {
+      return res.status(404).json({ message: "File not found" });
+    }
+
+    // Delete the file
+    fs.unlinkSync(filePath);
+    
+    res.json({ message: "File deleted successfully" });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ message: "Server error" });
+  }
+});
+
+// ANALYTICS ROUTES
+app.get("/analytics/dashboard", authenticate, async (req, res) => {
+  try {
+    let dashboardData = {};
+
+    if (req.user.role === "ADMIN") {
+      // Admin dashboard
+      const totalUsersResult = await query('SELECT COUNT(*) as count FROM users');
+      const totalProposalsResult = await query('SELECT COUNT(*) as count FROM proposals');
+      const pendingProposalsResult = await query('SELECT COUNT(*) as count FROM proposals WHERE status = $1', ['PENDING']);
+      const approvedProposalsResult = await query('SELECT COUNT(*) as count FROM proposals WHERE status = $1', ['APPROVED']);
+      const rejectedProposalsResult = await query('SELECT COUNT(*) as count FROM proposals WHERE status = $1', ['REJECTED']);
+      const totalBooksResult = await query('SELECT COUNT(*) as count FROM project_books');
+      const unreadNotificationsResult = await query('SELECT COUNT(*) as count FROM notifications WHERE user_id = $1 AND is_read = false', [req.user.id]);
+
+      // Recent proposals
+      const recentProposalsResult = await query(`
+        SELECT p.id, p.title, p.status, p.created_at, s.name as student_name, t.name as supervisor_name
+        FROM proposals p
+        JOIN users s ON p.student_id = s.id
+        JOIN users t ON p.supervisor_id = t.id
+        ORDER BY p.created_at DESC LIMIT 5
+      `);
+
+      // Proposal status distribution
+      const statusDistributionResult = await query(`
+        SELECT status, COUNT(*) as count FROM proposals GROUP BY status
+      `);
+
+      dashboardData = {
+        totalUsers: parseInt(totalUsersResult.rows[0].count),
+        totalProposals: parseInt(totalProposalsResult.rows[0].count),
+        pendingProposals: parseInt(pendingProposalsResult.rows[0].count),
+        approvedProposals: parseInt(approvedProposalsResult.rows[0].count),
+        rejectedProposals: parseInt(rejectedProposalsResult.rows[0].count),
+        totalBooks: parseInt(totalBooksResult.rows[0].count),
+        unreadNotifications: parseInt(unreadNotificationsResult.rows[0].count),
+        recentProposals: recentProposalsResult.rows,
+        statusDistribution: statusDistributionResult.rows
+      };
+
+    } else if (req.user.role === "TEACHER") {
+      // Teacher dashboard
+      const assignedProposalsResult = await query('SELECT COUNT(*) as count FROM proposals WHERE supervisor_id = $1', [req.user.id]);
+      const pendingReviewsResult = await query('SELECT COUNT(*) as count FROM proposals WHERE supervisor_id = $1 AND status = $2', [req.user.id, 'PENDING']);
+      const booksToReviewResult = await query(`
+        SELECT COUNT(*) as count FROM project_books pb 
+        JOIN proposals p ON pb.proposal_id = p.id 
+        WHERE p.supervisor_id = $1 AND pb.status IN ('PENDING', 'UNDER_REVIEW')
+      `, [req.user.id]);
+      const unreadNotificationsResult = await query('SELECT COUNT(*) as count FROM notifications WHERE user_id = $1 AND is_read = false', [req.user.id]);
+
+      // Recent assigned proposals
+      const recentProposalsResult = await query(`
+        SELECT p.id, p.title, p.status, p.created_at, s.name as student_name
+        FROM proposals p
+        JOIN users s ON p.student_id = s.id
+        WHERE p.supervisor_id = $1
+        ORDER BY p.created_at DESC LIMIT 5
+      `, [req.user.id]);
+
+      dashboardData = {
+        assignedProposals: parseInt(assignedProposalsResult.rows[0].count),
+        pendingReviews: parseInt(pendingReviewsResult.rows[0].count),
+        booksToReview: parseInt(booksToReviewResult.rows[0].count),
+        unreadNotifications: parseInt(unreadNotificationsResult.rows[0].count),
+        recentProposals: recentProposalsResult.rows
+      };
+
+    } else if (req.user.role === "STUDENT") {
+      // Student dashboard
+      const myProposalsResult = await query('SELECT COUNT(*) as count FROM proposals WHERE student_id = $1', [req.user.id]);
+      const myBooksResult = await query(`
+        SELECT COUNT(*) as count FROM project_books pb 
+        JOIN proposals p ON pb.proposal_id = p.id 
+        WHERE p.student_id = $1
+      `, [req.user.id]);
+      const unreadNotificationsResult = await query('SELECT COUNT(*) as count FROM notifications WHERE user_id = $1 AND is_read = false', [req.user.id]);
+
+      // My recent proposals
+      const recentProposalsResult = await query(`
+        SELECT p.id, p.title, p.status, p.created_at, t.name as supervisor_name
+        FROM proposals p
+        JOIN users t ON p.supervisor_id = t.id
+        WHERE p.student_id = $1
+        ORDER BY p.created_at DESC LIMIT 5
+      `, [req.user.id]);
+
+      dashboardData = {
+        myProposals: parseInt(myProposalsResult.rows[0].count),
+        myBooks: parseInt(myBooksResult.rows[0].count),
+        unreadNotifications: parseInt(unreadNotificationsResult.rows[0].count),
+        recentProposals: recentProposalsResult.rows
+      };
+    }
+
+    res.json(dashboardData);
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ message: "Server error" });
+  }
+});
+
+app.get("/analytics/proposals", authenticate, authorize(["ADMIN", "TEACHER"]), async (req, res) => {
+  try {
+    const { startDate, endDate, groupBy = 'status' } = req.query;
+    
+    let baseQuery = `
+      SELECT ${groupBy}, COUNT(*) as count, 
+             AVG(EXTRACT(DAY FROM (updated_at - created_at))) as avg_review_days
+      FROM proposals p
+    `;
+    
+    let params = [];
+    let whereConditions = [];
+
+    if (req.user.role === "TEACHER") {
+      whereConditions.push(`p.supervisor_id = $${params.length + 1}`);
+      params.push(req.user.id);
+    }
+
+    if (startDate) {
+      whereConditions.push(`p.created_at >= $${params.length + 1}`);
+      params.push(startDate);
+    }
+
+    if (endDate) {
+      whereConditions.push(`p.created_at <= $${params.length + 1}`);
+      params.push(endDate);
+    }
+
+    if (whereConditions.length > 0) {
+      baseQuery += ` WHERE ${whereConditions.join(' AND ')}`;
+    }
+
+    baseQuery += ` GROUP BY ${groupBy} ORDER BY count DESC`;
+
+    const result = await query(baseQuery, params);
+    
+    res.json({
+      data: result.rows,
+      groupBy
+    });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ message: "Server error" });
+  }
+});
+
+app.get("/analytics/users", authenticate, authorize(["ADMIN"]), async (req, res) => {
+  try {
+    // User statistics by role
+    const roleStatsResult = await query(`
+      SELECT role, COUNT(*) as count FROM users GROUP BY role
+    `);
+
+    // Registration trend (last 30 days)
+    const registrationTrendResult = await query(`
+      SELECT DATE(created_at) as date, COUNT(*) as count
+      FROM users
+      WHERE created_at >= NOW() - INTERVAL '30 days'
+      GROUP BY DATE(created_at)
+      ORDER BY date DESC
+    `);
+
+    // Most active users (by proposals submitted)
+    const activeUsersResult = await query(`
+      SELECT u.name, u.email, u.role, COUNT(p.id) as proposal_count
+      FROM users u
+      LEFT JOIN proposals p ON u.id = p.student_id
+      WHERE u.role = 'STUDENT'
+      GROUP BY u.id, u.name, u.email, u.role
+      ORDER BY proposal_count DESC
+      LIMIT 10
+    `);
+
+    res.json({
+      roleStats: roleStatsResult.rows,
+      registrationTrend: registrationTrendResult.rows,
+      activeUsers: activeUsersResult.rows
+    });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ message: "Server error" });
+  }
+});
+
+// Helper function to create notifications
+const createNotification = async (userId, type, title, message, metadata = {}) => {
+  try {
+    await query(
+      'INSERT INTO notifications (user_id, type, title, message, metadata) VALUES ($1, $2, $3, $4, $5)',
+      [userId, type, title, message, JSON.stringify(metadata)]
+    );
+  } catch (error) {
+    console.error('Failed to create notification:', error);
+  }
+};
 
 // Initialize database before starting server
 initializeDatabase().then(() => {

@@ -1,0 +1,246 @@
+{
+  "timestamp": "2025-08-09T15:07:49.817Z",
+  "summary": {
+    "passed": 39,
+    "failed": 0,
+    "total": 39,
+    "successRate": "100.0"
+  },
+  "details": [
+    {
+      "name": "Health Check",
+      "success": true,
+      "details": "",
+      "fullError": null
+    },
+    {
+      "name": "Admin Login",
+      "success": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1c2VySWQiOjEsImVtYWlsIjoicmhtdW5uYTE5QGdtYWlsLmNvbSIsInJvbGUiOiJBRE1JTiIsImlhdCI6MTc1NDc1MjA2NywiZXhwIjoxNzg2Mjg4MDY3fQ.0H1uP-R7IpcKmdOR5fi4Rvkz65HxB3E8CEFocLgRIAo",
+      "details": "",
+      "fullError": null
+    },
+    {
+      "name": "Get Current User (/me)",
+      "success": true,
+      "details": "",
+      "fullError": null
+    },
+    {
+      "name": "Student Signup",
+      "success": true,
+      "details": "",
+      "fullError": null
+    },
+    {
+      "name": "Student Login",
+      "success": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1c2VySWQiOjQsImVtYWlsIjoidGVzdC5zdHVkZW50LjE3NTQ3NTIwNjcxNjNAdW5pdmVyc2l0eS5lZHUiLCJyb2xlIjoiU1RVREVOVCIsImlhdCI6MTc1NDc1MjA2OCwiZXhwIjoxNzg2Mjg4MDY4fQ.CAWjsky0ang_orRTgwlFyNbOrYJmSbOsJ6FPRMYiR_8",
+      "details": "",
+      "fullError": null
+    },
+    {
+      "name": "Admin Register Teacher",
+      "success": true,
+      "details": "",
+      "fullError": null
+    },
+    {
+      "name": "Teacher Login",
+      "success": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1c2VySWQiOjUsImVtYWlsIjoidGVzdC50ZWFjaGVyLjE3NTQ3NTIwNjcxNjNAdW5pdmVyc2l0eS5lZHUiLCJyb2xlIjoiVEVBQ0hFUiIsImlhdCI6MTc1NDc1MjA2OCwiZXhwIjoxNzg2Mjg4MDY4fQ.P8wqUoCUbx2DiJFCzCJQQ049eaWXtFR84twz7wUGT8Y",
+      "details": "",
+      "fullError": null
+    },
+    {
+      "name": "Get User Profile",
+      "success": true,
+      "details": "",
+      "fullError": null
+    },
+    {
+      "name": "Update User Profile",
+      "success": true,
+      "details": "",
+      "fullError": null
+    },
+    {
+      "name": "Get All Users (Admin)",
+      "success": true,
+      "details": "",
+      "fullError": null
+    },
+    {
+      "name": "Get User by ID",
+      "success": true,
+      "details": "",
+      "fullError": null
+    },
+    {
+      "name": "Update User Role",
+      "success": true,
+      "details": "",
+      "fullError": null
+    },
+    {
+      "name": "Get Active Session",
+      "success": true,
+      "details": "",
+      "fullError": null
+    },
+    {
+      "name": "Create New Session",
+      "success": true,
+      "details": "",
+      "fullError": null
+    },
+    {
+      "name": "Get Proposals (Student)",
+      "success": true,
+      "details": "",
+      "fullError": null
+    },
+    {
+      "name": "Submit New Proposal",
+      "success": true,
+      "details": "",
+      "fullError": null
+    },
+    {
+      "name": "Update Proposal Status",
+      "success": true,
+      "details": "",
+      "fullError": null
+    },
+    {
+      "name": "Assign Supervisor",
+      "success": true,
+      "details": "",
+      "fullError": null
+    },
+    {
+      "name": "Get Proposals (Teacher)",
+      "success": true,
+      "details": "",
+      "fullError": null
+    },
+    {
+      "name": "Get Proposals (Admin)",
+      "success": true,
+      "details": "",
+      "fullError": null
+    },
+    {
+      "name": "Add Comment to Proposal",
+      "success": true,
+      "details": "",
+      "fullError": null
+    },
+    {
+      "name": "Submit Project Book",
+      "success": true,
+      "details": "",
+      "fullError": null
+    },
+    {
+      "name": "Get All Project Books",
+      "success": true,
+      "details": "",
+      "fullError": null
+    },
+    {
+      "name": "Get Project Book by ID",
+      "success": true,
+      "details": "",
+      "fullError": null
+    },
+    {
+      "name": "Review Project Book",
+      "success": true,
+      "details": "",
+      "fullError": null
+    },
+    {
+      "name": "Get User Notifications",
+      "success": true,
+      "details": "",
+      "fullError": null
+    },
+    {
+      "name": "Mark All Notifications as Read",
+      "success": true,
+      "details": "",
+      "fullError": null
+    },
+    {
+      "name": "Get Dashboard Data (Student)",
+      "success": true,
+      "details": "",
+      "fullError": null
+    },
+    {
+      "name": "Get Dashboard Data (Teacher)",
+      "success": true,
+      "details": "",
+      "fullError": null
+    },
+    {
+      "name": "Get Dashboard Data (Admin)",
+      "success": true,
+      "details": "",
+      "fullError": null
+    },
+    {
+      "name": "Get Proposal Analytics",
+      "success": true,
+      "details": "",
+      "fullError": null
+    },
+    {
+      "name": "Get User Analytics",
+      "success": true,
+      "details": "",
+      "fullError": null
+    },
+    {
+      "name": "Document Upload Endpoint Accessible",
+      "success": true,
+      "details": "No document file uploaded",
+      "fullError": null
+    },
+    {
+      "name": "Image Upload Endpoint Accessible",
+      "success": true,
+      "details": "No image file uploaded",
+      "fullError": null
+    },
+    {
+      "name": "Profile Upload Endpoint Accessible",
+      "success": true,
+      "details": "No profile image uploaded",
+      "fullError": null
+    },
+    {
+      "name": "Unauthorized Access (401)",
+      "success": true,
+      "details": "Should return 401 for unauthorized access",
+      "fullError": null
+    },
+    {
+      "name": "Invalid Token (401)",
+      "success": true,
+      "details": "Should return 401 for invalid token",
+      "fullError": null
+    },
+    {
+      "name": "Forbidden Access (403)",
+      "success": true,
+      "details": "Should return 403 for forbidden access",
+      "fullError": null
+    },
+    {
+      "name": "Not Found (404)",
+      "success": true,
+      "details": "Should return 404 for non-existent endpoint",
+      "fullError": null
+    }
+  ],
+  "errors": []
+}
