@@ -321,6 +321,54 @@
             },
             "description": "Update user role (Admin only)"
           }
+        },
+        {
+          "name": "Get All Teachers",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{token}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/teachers?department=Computer Science&search=john",
+              "host": ["{{baseUrl}}"],
+              "path": ["teachers"],
+              "query": [
+                {
+                  "key": "department",
+                  "value": "Computer Science",
+                  "description": "Filter by department (optional)"
+                },
+                {
+                  "key": "search",
+                  "value": "john",
+                  "description": "Search by name or email (optional)"
+                }
+              ]
+            },
+            "description": "Get all active teachers for supervisor selection. Available to all authenticated users."
+          }
+        },
+        {
+          "name": "Get All Departments",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{token}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/departments",
+              "host": ["{{baseUrl}}"],
+              "path": ["departments"]
+            },
+            "description": "Get list of all departments from active users. Available to all authenticated users."
+          }
         }
       ]
     },
@@ -421,6 +469,60 @@
               "path": ["proposals", "1", "assign"]
             },
             "description": "Assign or reassign supervisor to a proposal (Admin only)"
+          }
+        },
+        {
+          "name": "Get Proposal by ID",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{token}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/proposals/1",
+              "host": ["{{baseUrl}}"],
+              "path": ["proposals", "1"]
+            },
+            "description": "Get detailed proposal information including comments. Access based on user role: Students see their own, Teachers see assigned ones, Admins see all."
+          }
+        },
+        {
+          "name": "Delete Proposal",
+          "request": {
+            "method": "DELETE",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{token}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/proposals/1",
+              "host": ["{{baseUrl}}"],
+              "path": ["proposals", "1"]
+            },
+            "description": "Delete a proposal. Students can only delete their own pending proposals. Admins can delete any proposal."
+          }
+        },
+        {
+          "name": "Get Proposal Comments",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{token}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/proposals/1/comments",
+              "host": ["{{baseUrl}}"],
+              "path": ["proposals", "1", "comments"]
+            },
+            "description": "Get all comments for a specific proposal. Access based on user role permissions."
           }
         }
       ]

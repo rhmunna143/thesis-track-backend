@@ -881,6 +881,193 @@ app.patch(
   }
 );
 
+// Get proposal by ID
+app.get("/proposals/:id", authenticate, async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    // Get proposal with student and supervisor details
+    const proposalResult = await query(
+      `SELECT 
+        p.id, p.title, p.abstract, p.status, p.document_url, 
+        p.student_id, p.supervisor_id, p.created_at, p.updated_at,
+        s.id as s_id, s.name as student_name, s.email as student_email,
+        t.id as t_id, t.name as supervisor_name, t.email as supervisor_email
+      FROM proposals p
+      JOIN users s ON p.student_id = s.id
+      JOIN users t ON p.supervisor_id = t.id
+      WHERE p.id = $1`,
+      [id]
+    );
+
+    if (proposalResult.rows.length === 0) {
+      return res.status(404).json({ message: "Proposal not found" });
+    }
+
+    const proposal = proposalResult.rows[0];
+
+    // Check access permissions
+    if (req.user.role === "STUDENT" && proposal.student_id !== req.user.id) {
+      return res.status(403).json({ message: "Access denied" });
+    }
+    if (req.user.role === "TEACHER" && proposal.supervisor_id !== req.user.id) {
+      return res.status(403).json({ message: "Access denied" });
+    }
+
+    // Get comments for this proposal
+    const commentsResult = await query(
+      `SELECT c.id, c.content, c.commenter_id, c.created_at, 
+       u.name as commenter_name, u.role as commenter_role
+       FROM comments c
+       JOIN users u ON c.commenter_id = u.id
+       WHERE c.proposal_id = $1
+       ORDER BY c.created_at DESC`,
+      [id]
+    );
+
+    // Format the response
+    const result = {
+      id: proposal.id,
+      title: proposal.title,
+      abstract: proposal.abstract,
+      status: proposal.status,
+      documentUrl: proposal.document_url,
+      studentId: proposal.student_id,
+      supervisorId: proposal.supervisor_id,
+      createdAt: proposal.created_at,
+      updatedAt: proposal.updated_at,
+      student: {
+        id: proposal.s_id,
+        name: proposal.student_name,
+        email: proposal.student_email
+      },
+      supervisor: {
+        id: proposal.t_id,
+        name: proposal.supervisor_name,
+        email: proposal.supervisor_email
+      },
+      comments: commentsResult.rows.map(c => ({
+        id: c.id,
+        content: c.content,
+        commenterId: c.commenter_id,
+        createdAt: c.created_at,
+        commenter: {
+          id: c.commenter_id,
+          name: c.commenter_name,
+          role: c.commenter_role
+        }
+      }))
+    };
+
+    res.json(result);
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ message: "Server error" });
+  }
+});
+
+// Delete proposal
+app.delete("/proposals/:id", authenticate, async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    // Get proposal details first
+    const proposalResult = await query(
+      'SELECT * FROM proposals WHERE id = $1',
+      [id]
+    );
+
+    if (proposalResult.rows.length === 0) {
+      return res.status(404).json({ message: "Proposal not found" });
+    }
+
+    const proposal = proposalResult.rows[0];
+
+    // Check permissions
+    if (req.user.role === "STUDENT") {
+      // Students can only delete their own proposals
+      if (proposal.student_id !== req.user.id) {
+        return res.status(403).json({ message: "You can only delete your own proposals" });
+      }
+      // Students can only delete pending proposals
+      if (proposal.status !== 'PENDING') {
+        return res.status(400).json({ message: "You can only delete pending proposals" });
+      }
+    }
+    // Admins can delete any proposal (no additional checks needed)
+
+    // Delete related comments first (due to foreign key constraints)
+    await query('DELETE FROM comments WHERE proposal_id = $1', [id]);
+
+    // Delete the proposal
+    await query('DELETE FROM proposals WHERE id = $1', [id]);
+
+    res.json({ message: "Proposal deleted successfully" });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ message: "Server error" });
+  }
+});
+
+// Get comments for a specific proposal
+app.get("/proposals/:id/comments", authenticate, async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    // First check if proposal exists and user has access
+    const proposalResult = await query(
+      'SELECT student_id, supervisor_id FROM proposals WHERE id = $1',
+      [id]
+    );
+
+    if (proposalResult.rows.length === 0) {
+      return res.status(404).json({ message: "Proposal not found" });
+    }
+
+    const proposal = proposalResult.rows[0];
+
+    // Check access permissions
+    if (req.user.role === "STUDENT" && proposal.student_id !== req.user.id) {
+      return res.status(403).json({ message: "Access denied" });
+    }
+    if (req.user.role === "TEACHER" && proposal.supervisor_id !== req.user.id) {
+      return res.status(403).json({ message: "Access denied" });
+    }
+
+    // Get comments for this proposal
+    const commentsResult = await query(
+      `SELECT c.id, c.content, c.commenter_id, c.parent_comment_id, 
+              c.is_resolved, c.created_at, c.updated_at,
+       u.name as commenter_name, u.role as commenter_role
+       FROM comments c
+       JOIN users u ON c.commenter_id = u.id
+       WHERE c.proposal_id = $1
+       ORDER BY c.created_at ASC`,
+      [id]
+    );
+
+    const comments = commentsResult.rows.map(c => ({
+      id: c.id,
+      content: c.content,
+      commenterId: c.commenter_id,
+      parentCommentId: c.parent_comment_id,
+      isResolved: c.is_resolved,
+      createdAt: c.created_at,
+      updatedAt: c.updated_at,
+      commenter: {
+        id: c.commenter_id,
+        name: c.commenter_name,
+        role: c.commenter_role
+      }
+    }));
+
+    res.json(comments);
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ message: "Server error" });
+  }
+});
+
 // COMMENT ROUTES
 app.post(
   "/comments",
@@ -1208,6 +1395,60 @@ app.get("/users", authenticate, authorize(["ADMIN"]), async (req, res) => {
         totalPages: Math.ceil(total / limit)
       }
     });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ message: "Server error" });
+  }
+});
+
+// Get all teachers for student selection
+app.get("/teachers", authenticate, async (req, res) => {
+  try {
+    const { department, search } = req.query;
+    
+    let teachersQuery = `
+      SELECT id, name, email, department, bio, expertise, profile_picture
+      FROM users 
+      WHERE role = 'TEACHER' AND is_active = true
+    `;
+    let params = [];
+
+    if (department) {
+      teachersQuery += ` AND department = $${params.length + 1}`;
+      params.push(department);
+    }
+
+    if (search) {
+      teachersQuery += ` AND (name ILIKE $${params.length + 1} OR email ILIKE $${params.length + 1})`;
+      params.push(`%${search}%`);
+    }
+
+    teachersQuery += ` ORDER BY name ASC`;
+
+    const result = await query(teachersQuery, params);
+    res.json(result.rows);
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ message: "Server error" });
+  }
+});
+
+// Get all departments
+app.get("/departments", authenticate, async (req, res) => {
+  try {
+    const departmentsResult = await query(`
+      SELECT DISTINCT department 
+      FROM users 
+      WHERE department IS NOT NULL 
+        AND department != '' 
+        AND is_active = true
+      ORDER BY department ASC
+    `);
+
+    // Extract just the department names
+    const departments = departmentsResult.rows.map(row => row.department);
+    
+    res.json(departments);
   } catch (error) {
     console.error(error);
     res.status(500).json({ message: "Server error" });
